@@ -73,6 +73,7 @@ func run() error {
 		"accounts", len(cfg.Accounts),
 		"send_enabled", cfg.AllowSend,
 		"delete_enabled", cfg.AllowDelete,
+		"idle_connection_timeout", cfg.IdleConnTTL,
 	)
 
 	pool := mailbox.NewPool(cfg, logger)

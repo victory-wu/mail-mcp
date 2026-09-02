@@ -28,6 +28,12 @@ import (
 // Overwritten from main at startup.
 var Version = "dev"
 
+const (
+	idleHealthCheckAfter  = 5 * time.Minute
+	minCleanupCheckPeriod = 10 * time.Millisecond
+	maxCleanupCheckPeriod = time.Minute
+)
+
 // clientID identifies us to the server via RFC 2971 ID. Some providers
 // (notably Netease 163/126) reject clients that never identify themselves.
 // Built lazily so it picks up the Version set by main.
@@ -37,11 +43,17 @@ func clientID() *imap.IDData {
 
 // Pool holds one IMAP connection per account.
 type Pool struct {
-	cfg    *config.Config
-	logger *slog.Logger
+	cfg         *config.Config
+	logger      *slog.Logger
+	idleConnTTL time.Duration
 
-	mu    sync.Mutex
-	conns map[string]*pooledConn
+	mu        sync.Mutex
+	conns     map[string]*pooledConn
+	closed    bool
+	closeOnce sync.Once
+
+	stopCleanup chan struct{}
+	cleanupDone chan struct{}
 }
 
 // pooledConn is a single authenticated connection plus its state.
@@ -61,31 +73,49 @@ type pooledConn struct {
 
 // NewPool creates an empty pool. Connections are established lazily.
 func NewPool(cfg *config.Config, logger *slog.Logger) *Pool {
-	return &Pool{
-		cfg:    cfg,
-		logger: logger,
-		conns:  make(map[string]*pooledConn),
+	idleConnTTL := cfg.IdleConnTTL
+	if idleConnTTL <= 0 {
+		idleConnTTL = config.DefaultIdleConnTTL
 	}
+	p := &Pool{
+		cfg:         cfg,
+		logger:      logger,
+		idleConnTTL: idleConnTTL,
+		conns:       make(map[string]*pooledConn),
+		stopCleanup: make(chan struct{}),
+		cleanupDone: make(chan struct{}),
+	}
+	go p.cleanupIdleConnections()
+	return p
 }
 
 // Close tears down every pooled connection.
 func (p *Pool) Close() {
-	p.mu.Lock()
-	conns := make([]*pooledConn, 0, len(p.conns))
-	for _, c := range p.conns {
-		conns = append(conns, c)
-	}
-	p.conns = make(map[string]*pooledConn)
-	p.mu.Unlock()
+	p.closeOnce.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 
-	for _, c := range conns {
-		c.mu.Lock()
-		if c.client != nil {
-			_ = c.client.Logout().Wait()
-			_ = c.client.Close()
+		close(p.stopCleanup)
+		<-p.cleanupDone
+
+		p.mu.Lock()
+		conns := make([]*pooledConn, 0, len(p.conns))
+		for _, c := range p.conns {
+			conns = append(conns, c)
 		}
-		c.mu.Unlock()
-	}
+		p.conns = make(map[string]*pooledConn)
+		p.mu.Unlock()
+
+		for _, c := range conns {
+			c.mu.Lock()
+			if c.client != nil {
+				_ = c.client.Logout().Wait()
+				_ = c.client.Close()
+			}
+			c.mu.Unlock()
+		}
+	})
 }
 
 // Do runs fn against an authenticated session for acc.
@@ -95,9 +125,10 @@ func (p *Pool) Close() {
 // which is the only way to unblock a stuck IMAP command, and the next call
 // reconnects.
 func (p *Pool) Do(ctx context.Context, acc *config.Account, fn func(*Session) error) error {
-	pc := p.connFor(acc)
-
-	pc.mu.Lock()
+	pc, err := p.lockConnFor(acc)
+	if err != nil {
+		return err
+	}
 	defer pc.mu.Unlock()
 
 	if err := p.ensureAlive(pc, acc); err != nil {
@@ -135,15 +166,34 @@ func (p *Pool) Do(ctx context.Context, acc *config.Account, fn func(*Session) er
 	}
 }
 
-func (p *Pool) connFor(acc *config.Account) *pooledConn {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	pc, ok := p.conns[acc.ID]
-	if !ok {
-		pc = &pooledConn{}
-		p.conns[acc.ID] = pc
+func (p *Pool) lockConnFor(acc *config.Account) (*pooledConn, error) {
+	for {
+		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return nil, errors.New("IMAP connection pool is closed; retry after restarting the server")
+		}
+		pc, ok := p.conns[acc.ID]
+		if !ok {
+			pc = &pooledConn{}
+			p.conns[acc.ID] = pc
+		}
+		p.mu.Unlock()
+
+		pc.mu.Lock()
+		p.mu.Lock()
+		current, exists := p.conns[acc.ID]
+		valid := !p.closed && exists && current == pc
+		closed := p.closed
+		p.mu.Unlock()
+		if valid {
+			return pc, nil
+		}
+		pc.mu.Unlock()
+		if closed {
+			return nil, errors.New("IMAP connection pool is closed; retry after restarting the server")
+		}
 	}
-	return pc
 }
 
 // ensureAlive reconnects when the pooled connection is missing, marked dead,
@@ -152,16 +202,21 @@ func (p *Pool) connFor(acc *config.Account) *pooledConn {
 // Caller must hold pc.mu.
 func (p *Pool) ensureAlive(pc *pooledConn, acc *config.Account) error {
 	if pc.client != nil && !pc.dead {
-		if time.Since(pc.lastUsed) < p.cfg.IdleConnTTL && pc.client.State() >= imap.ConnStateAuthenticated {
+		idleFor := time.Since(pc.lastUsed)
+		if idleFor >= p.idleConnTTL {
+			p.logger.Debug("pooled IMAP connection exceeded idle timeout, reconnecting", "account", acc.ID)
+			p.closeConn(pc)
+		} else if idleFor < idleHealthCheckAfter && pc.client.State() >= imap.ConnStateAuthenticated {
 			return nil
+		} else {
+			// A server may have dropped an idle connection without telling us.
+			// NOOP is the cheapest way to find out before a real command fails.
+			if err := pc.client.Noop().Wait(); err == nil {
+				return nil
+			}
+			p.logger.Debug("pooled IMAP connection went stale, reconnecting", "account", acc.ID)
+			p.closeConn(pc)
 		}
-		// A server may have dropped an idle connection without telling us.
-		// NOOP is the cheapest way to find out before a real command fails.
-		if err := pc.client.Noop().Wait(); err == nil {
-			return nil
-		}
-		p.logger.Debug("pooled IMAP connection went stale, reconnecting", "account", acc.ID)
-		p.closeConn(pc)
 	}
 
 	client, err := dial(acc, p.cfg.Timeouts.IMAPConnect)
@@ -175,6 +230,57 @@ func (p *Pool) ensureAlive(pc *pooledConn, acc *config.Account) error {
 	pc.lastUsed = time.Now()
 	p.logger.Debug("opened IMAP connection", "account", acc.ID, "host", acc.IMAP.Host)
 	return nil
+}
+
+func (p *Pool) cleanupIdleConnections() {
+	defer close(p.cleanupDone)
+
+	interval := p.idleConnTTL / 2
+	if interval < minCleanupCheckPeriod {
+		interval = minCleanupCheckPeriod
+	}
+	if interval > maxCleanupCheckPeriod {
+		interval = maxCleanupCheckPeriod
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case now := <-ticker.C:
+			p.closeIdleConnections(now)
+		case <-p.stopCleanup:
+			return
+		}
+	}
+}
+
+func (p *Pool) closeIdleConnections(now time.Time) {
+	type idleConn struct {
+		accountID string
+		conn      *pooledConn
+	}
+
+	var idle []idleConn
+	p.mu.Lock()
+	for accountID, pc := range p.conns {
+		if !pc.mu.TryLock() {
+			continue
+		}
+		if pc.lastUsed.IsZero() || now.Sub(pc.lastUsed) < p.idleConnTTL {
+			pc.mu.Unlock()
+			continue
+		}
+		delete(p.conns, accountID)
+		idle = append(idle, idleConn{accountID: accountID, conn: pc})
+	}
+	p.mu.Unlock()
+
+	for _, entry := range idle {
+		p.closeConn(entry.conn)
+		entry.conn.mu.Unlock()
+		p.logger.Debug("closed idle pooled IMAP connection", "account", entry.accountID, "idle_timeout", p.idleConnTTL)
+	}
 }
 
 // discard marks a connection unusable and closes it.

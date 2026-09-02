@@ -26,6 +26,10 @@ allow_delete: false
 # curl instead. Leave empty for stdio. Links expire after 15 minutes.
 # public_url: https://mail-mcp.example.com
 
+# Close pooled IMAP connections after this much time without access. The
+# cleanup task runs in the background and never interrupts an active command.
+idle_connection_timeout: 24h
+
 # ---------------------------------------------------------------------------
 # Limits — bound what a single tool call can cost
 # ---------------------------------------------------------------------------

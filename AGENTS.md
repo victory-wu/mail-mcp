@@ -128,6 +128,7 @@ Explain *why*, not *what*. Existing comments justify non-obvious decisions — t
 - All IMAP work goes through `Pool.Do`, which holds the per-account lock.
 - Do not hold a `*Session` past the end of its callback.
 - Every network call must be timeout-bounded by a configured value, never a hardcoded one.
+- The pool cleanup task closes connections idle for `idle_connection_timeout` (24 hours by default) and must not interrupt active commands.
 
 ## Testing Expectations
 

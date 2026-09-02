@@ -141,7 +141,7 @@ For a client on the same machine, stdio skips the network entirely and needs no 
 
 **Bodies are truncated and HTML is opt-in.** Message HTML is attacker-controlled and enormous. It is sanitized through bluemonday before it is ever returned, and omitted entirely unless `include_html` is set. Messages with no plain-text part get one derived from the HTML, with paragraph breaks preserved.
 
-**One pooled IMAP connection per account.** A TLS handshake plus LOGIN on every tool call is the single biggest source of latency in servers of this kind. Connections are kept authenticated, health-checked with NOOP after idling, and reconnected transparently. Operations on one account are serialized, since IMAP's selected-mailbox state makes ordering matter; different accounts run concurrently.
+**One pooled IMAP connection per account.** A TLS handshake plus LOGIN on every tool call is the single biggest source of latency in servers of this kind. Connections are kept authenticated, health-checked with NOOP after idling, and reconnected transparently. A background cleanup task closes connections that have not been accessed for `idle_connection_timeout` (24 hours by default) without interrupting active commands. Operations on one account are serialized, since IMAP's selected-mailbox state makes ordering matter; different accounts run concurrently.
 
 **Every network operation is bounded.** Separate timeouts for IMAP connect, IMAP command, SMTP connect, and SMTP send — the last one generous, because DATA transmission for a large attachment on a slow uplink legitimately takes minutes. A command that exceeds its budget closes the socket, which is the only thing that reliably unblocks a stuck IMAP read.
 
@@ -185,6 +185,7 @@ See [`config.example.yml`](config.example.yml) for the annotated version.
 | `limits.max_attachment_bytes`| `26214400`     | Attachment size ceiling.                                   |
 | `limits.attachment_dir`      | system temp    | Where `get_attachment` writes.                             |
 | `public_url`                 | empty          | Origin used to mint `download_url`. Empty disables it.     |
+| `idle_connection_timeout`    | `24h`          | Close pooled IMAP connections idle for this duration.      |
 | `timeouts.*`                 | see example    | `imap_connect`, `imap_command`, `smtp_connect`, `smtp_send`. |
 | `accounts[].allow_send`      | inherits global| Per-account send gate.                                     |
 | `accounts[].allow_delete`    | inherits global| Per-account delete gate.                                   |

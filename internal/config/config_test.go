@@ -65,6 +65,9 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	if cfg.Timeouts.SMTPSend != DefaultSMTPSend {
 		t.Errorf("smtp send timeout = %s", cfg.Timeouts.SMTPSend)
 	}
+	if cfg.IdleConnTTL != DefaultIdleConnTTL {
+		t.Errorf("idle connection timeout = %s", cfg.IdleConnTTL)
+	}
 	if cfg.Limits.AttachmentDir == "" {
 		t.Error("attachment dir should default to the temp directory")
 	}
@@ -182,6 +185,7 @@ accounts:
 
 func TestCustomTimeouts(t *testing.T) {
 	cfg := loadOK(t, `
+idle_connection_timeout: 12h
 timeouts:
   imap_connect: 5s
   imap_command: 90s
@@ -192,10 +196,11 @@ accounts:
     imap: {host: h, username: u@e.com, password: p}
 `)
 	want := map[string]struct{ got, want time.Duration }{
-		"imap_connect": {cfg.Timeouts.IMAPConnect, 5 * time.Second},
-		"imap_command": {cfg.Timeouts.IMAPCommand, 90 * time.Second},
-		"smtp_connect": {cfg.Timeouts.SMTPConnect, 15 * time.Second},
-		"smtp_send":    {cfg.Timeouts.SMTPSend, 10 * time.Minute},
+		"imap_connect":            {cfg.Timeouts.IMAPConnect, 5 * time.Second},
+		"imap_command":            {cfg.Timeouts.IMAPCommand, 90 * time.Second},
+		"smtp_connect":            {cfg.Timeouts.SMTPConnect, 15 * time.Second},
+		"smtp_send":               {cfg.Timeouts.SMTPSend, 10 * time.Minute},
+		"idle_connection_timeout": {cfg.IdleConnTTL, 12 * time.Hour},
 	}
 	for name, c := range want {
 		if c.got != c.want {
@@ -206,17 +211,19 @@ accounts:
 
 func TestLoadRejectsInvalidConfigs(t *testing.T) {
 	cases := map[string]string{
-		"no accounts":       `allow_send: true`,
-		"missing imap host": "accounts:\n  - id: a\n    imap: {username: u@e.com, password: p}",
-		"missing username":  "accounts:\n  - id: a\n    imap: {host: h, password: p}",
-		"missing password":  "accounts:\n  - id: a\n    imap: {host: h, username: u}",
-		"duplicate ids":     "accounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}\n  - id: A\n    imap: {host: h, username: u@e.com, password: p}",
-		"bad port":          "accounts:\n  - id: a\n    imap: {host: h, port: 99999, username: u@e.com, password: p}",
-		"bad security":      "accounts:\n  - id: a\n    imap: {host: h, security: carrier-pigeon, username: u@e.com, password: p}",
-		"bad timeout":       "timeouts: {imap_connect: soon}\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
-		"negative timeout":  "timeouts: {imap_connect: -5s}\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
-		"from not an email": "accounts:\n  - id: a\n    from_address: notanemail\n    imap: {host: h, username: u@e.com, password: p}",
-		"bad public_url":    "public_url: mail.example\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
+		"no accounts":           `allow_send: true`,
+		"missing imap host":     "accounts:\n  - id: a\n    imap: {username: u@e.com, password: p}",
+		"missing username":      "accounts:\n  - id: a\n    imap: {host: h, password: p}",
+		"missing password":      "accounts:\n  - id: a\n    imap: {host: h, username: u}",
+		"duplicate ids":         "accounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}\n  - id: A\n    imap: {host: h, username: u@e.com, password: p}",
+		"bad port":              "accounts:\n  - id: a\n    imap: {host: h, port: 99999, username: u@e.com, password: p}",
+		"bad security":          "accounts:\n  - id: a\n    imap: {host: h, security: carrier-pigeon, username: u@e.com, password: p}",
+		"bad timeout":           "timeouts: {imap_connect: soon}\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
+		"negative timeout":      "timeouts: {imap_connect: -5s}\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
+		"bad idle timeout":      "idle_connection_timeout: tomorrow\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
+		"negative idle timeout": "idle_connection_timeout: -1h\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
+		"from not an email":     "accounts:\n  - id: a\n    from_address: notanemail\n    imap: {host: h, username: u@e.com, password: p}",
+		"bad public_url":        "public_url: mail.example\naccounts:\n  - id: a\n    imap: {host: h, username: u@e.com, password: p}",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {

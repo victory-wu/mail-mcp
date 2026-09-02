@@ -112,12 +112,13 @@ type rawTimeouts struct {
 
 // Config is the fully resolved server configuration.
 type Config struct {
-	AllowSend   bool        `yaml:"allow_send"`
-	AllowDelete bool        `yaml:"allow_delete"`
-	Limits      Limits      `yaml:"limits"`
-	Timeouts    Timeouts    `yaml:"-"`
-	RawTimeouts rawTimeouts `yaml:"timeouts"`
-	Accounts    []*Account  `yaml:"accounts"`
+	AllowSend          bool        `yaml:"allow_send"`
+	AllowDelete        bool        `yaml:"allow_delete"`
+	Limits             Limits      `yaml:"limits"`
+	Timeouts           Timeouts    `yaml:"-"`
+	RawTimeouts        rawTimeouts `yaml:"timeouts"`
+	RawIdleConnTimeout string      `yaml:"idle_connection_timeout"`
+	Accounts           []*Account  `yaml:"accounts"`
 
 	// PublicURL is the absolute origin clients use to fetch attachments
 	// over HTTP. Empty means get_attachment will not mint a download_url
@@ -138,7 +139,7 @@ const (
 	DefaultIMAPCommand        = 60 * time.Second
 	DefaultSMTPConnect        = 30 * time.Second
 	DefaultSMTPSend           = 5 * time.Minute
-	DefaultIdleConnTTL        = 5 * time.Minute
+	DefaultIdleConnTTL        = 24 * time.Hour
 )
 
 // Load reads, normalizes, and validates the config file at path.
@@ -193,7 +194,9 @@ func (c *Config) normalize() error {
 	if c.Timeouts.SMTPSend, err = parseDuration(c.RawTimeouts.SMTPSend, DefaultSMTPSend); err != nil {
 		return fmt.Errorf("timeouts.smtp_send: %w", err)
 	}
-	c.IdleConnTTL = DefaultIdleConnTTL
+	if c.IdleConnTTL, err = parseDuration(c.RawIdleConnTimeout, DefaultIdleConnTTL); err != nil {
+		return fmt.Errorf("idle_connection_timeout: %w", err)
+	}
 
 	for i, acc := range c.Accounts {
 		if err := acc.normalize(i); err != nil {
