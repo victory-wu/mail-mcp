@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -17,40 +15,23 @@ import (
 	"github.com/kacperkwapisz/mail-mcp/internal/msgid"
 )
 
-const testConfig = `
-allow_send: true
-allow_delete: false
-accounts:
-  - id: personal
-    from_address: me@example.com
-    from_name: Test User
-    imap:
-      host: imap.example.com
-      username: me@example.com
-      password: secret-imap-password
-    smtp:
-      host: smtp.example.com
-      username: me@example.com
-      password: secret-smtp-password
-  - id: work
-    imap:
-      host: imap.work.example
-      username: me@work.example
-      password: another-secret
-    allow_send: false
-`
-
 func loadTestConfig(t *testing.T) *config.Config {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(path, []byte(testConfig), 0o600); err != nil {
-		t.Fatalf("write config: %v", err)
+	deny := false
+	return &config.Config{
+		AllowSend:   true,
+		Limits:      config.Limits{MaxBodyChars: config.DefaultMaxBodyChars, MaxSearchResults: config.DefaultMaxSearchResults, MaxAttachmentBytes: config.DefaultMaxAttachmentBytes, AttachmentDir: t.TempDir()},
+		Timeouts:    config.Timeouts{IMAPConnect: config.DefaultIMAPConnect, IMAPCommand: config.DefaultIMAPCommand, SMTPConnect: config.DefaultSMTPConnect, SMTPSend: config.DefaultSMTPSend},
+		IdleConnTTL: config.DefaultIdleConnTTL,
+		Accounts: []*config.Account{
+			{ID: "personal", FromAddress: "me@example.com", FromName: "Test User",
+				IMAP: config.Endpoint{Host: "imap.example.com", Port: 993, Security: config.SecurityTLS, Username: "me@example.com", Password: "secret-imap-password"},
+				SMTP: config.Endpoint{Host: "smtp.example.com", Port: 587, Security: config.SecuritySTARTTLS, Username: "me@example.com", Password: "secret-smtp-password"}},
+			{ID: "work", FromAddress: "me@work.example", AllowSend: &deny,
+				IMAP: config.Endpoint{Host: "imap.work.example", Port: 993, Security: config.SecurityTLS, Username: "me@work.example", Password: "another-secret"},
+				SMTP: config.Endpoint{Host: "imap.work.example", Port: 587, Security: config.SecuritySTARTTLS, Username: "me@work.example", Password: "another-secret"}},
+		},
 	}
-	cfg, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("load config: %v", err)
-	}
-	return cfg
 }
 
 // connect wires an in-memory client to a fully registered server.

@@ -19,7 +19,7 @@ func write(t *testing.T, body string) string {
 
 func loadOK(t *testing.T, body string) *Config {
 	t.Helper()
-	cfg, err := Load(write(t, body))
+	cfg, err := loadConfig(write(t, body), false)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -211,7 +211,6 @@ accounts:
 
 func TestLoadRejectsInvalidConfigs(t *testing.T) {
 	cases := map[string]string{
-		"no accounts":           `allow_send: true`,
 		"missing imap host":     "accounts:\n  - id: a\n    imap: {username: u@e.com, password: p}",
 		"missing username":      "accounts:\n  - id: a\n    imap: {host: h, password: p}",
 		"missing password":      "accounts:\n  - id: a\n    imap: {host: h, username: u}",
@@ -227,7 +226,7 @@ func TestLoadRejectsInvalidConfigs(t *testing.T) {
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Load(write(t, body)); err == nil {
+			if _, err := loadConfig(write(t, body), false); err == nil {
 				t.Errorf("Load accepted an invalid config (%s)", name)
 			}
 		})

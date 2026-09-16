@@ -1,6 +1,6 @@
 // Package config loads and validates mail-mcp server configuration.
 //
-// Configuration lives in a YAML file (default: config.yml) so credentials
+// Server settings live in YAML and account credentials live in Redis, so credentials
 // never reach the agent — tools only ever receive an opaque account_id.
 // A small number of environment variables override transport-level settings.
 package config
@@ -42,43 +42,44 @@ func ParseSecurity(v string) (Security, error) {
 
 // Endpoint is a host/port pair with credentials.
 type Endpoint struct {
-	Host     string   `yaml:"host"`
-	Port     int      `yaml:"port"`
-	Security Security `yaml:"security"`
-	Username string   `yaml:"username"`
-	Password string   `yaml:"password"`
+	Host     string   `yaml:"host" json:"host,omitempty"`
+	Port     int      `yaml:"port" json:"port,omitempty"`
+	Security Security `yaml:"security" json:"security,omitempty"`
+	Username string   `yaml:"username" json:"username,omitempty"`
+	Password string   `yaml:"password" json:"password,omitempty"`
 }
 
 // Account is a single mailbox the server can act on.
 type Account struct {
-	ID   string   `yaml:"id"`
-	IMAP Endpoint `yaml:"imap"`
-	SMTP Endpoint `yaml:"smtp"`
+	Hostname string   `yaml:"hostname" json:"hostname,omitempty"`
+	ID       string   `yaml:"id" json:"id,omitempty"`
+	IMAP     Endpoint `yaml:"imap" json:"imap,omitempty"`
+	SMTP     Endpoint `yaml:"smtp" json:"smtp,omitempty"`
 
 	// FromAddress overrides the From header. Defaults to the SMTP username,
 	// which matters for providers where the login differs from the sending
 	// identity (iCloud custom domains, Google Workspace aliases).
-	FromAddress string `yaml:"from_address"`
+	FromAddress string `yaml:"from_address" json:"from_address,omitempty"`
 	// FromName is the optional display name on outgoing mail.
-	FromName string `yaml:"from_name"`
+	FromName string `yaml:"from_name" json:"from_name,omitempty"`
 
 	// AllowSend / AllowDelete override the global gates for this account.
-	AllowSend   *bool `yaml:"allow_send"`
-	AllowDelete *bool `yaml:"allow_delete"`
+	AllowSend   *bool `yaml:"allow_send" json:"allow_send,omitempty"`
+	AllowDelete *bool `yaml:"allow_delete" json:"allow_delete,omitempty"`
 
 	// SaveSent controls whether outgoing mail is APPENDed to the Sent
 	// folder. Nil means "decide from the provider" — see ShouldSaveSent.
-	SaveSent *bool `yaml:"save_sent"`
+	SaveSent *bool `yaml:"save_sent" json:"save_sent,omitempty"`
 
 	// ---- legacy flat keys (poke-mail v1 config), normalized on load ----
-	LegacyIMAPHost string `yaml:"imap_host"`
-	LegacyIMAPPort int    `yaml:"imap_port"`
-	LegacyIMAPUser string `yaml:"imap_username"`
-	LegacyIMAPPass string `yaml:"imap_password"`
-	LegacySMTPHost string `yaml:"smtp_host"`
-	LegacySMTPPort int    `yaml:"smtp_port"`
-	LegacySMTPUser string `yaml:"smtp_username"`
-	LegacySMTPPass string `yaml:"smtp_password"`
+	LegacyIMAPHost string `yaml:"imap_host" json:"imap_host,omitempty"`
+	LegacyIMAPPort int    `yaml:"imap_port" json:"imap_port,omitempty"`
+	LegacyIMAPUser string `yaml:"imap_username" json:"imap_username,omitempty"`
+	LegacyIMAPPass string `yaml:"imap_password" json:"imap_password,omitempty"`
+	LegacySMTPHost string `yaml:"smtp_host" json:"smtp_host,omitempty"`
+	LegacySMTPPort int    `yaml:"smtp_port" json:"smtp_port,omitempty"`
+	LegacySMTPUser string `yaml:"smtp_username" json:"smtp_username,omitempty"`
+	LegacySMTPPass string `yaml:"smtp_password" json:"smtp_password,omitempty"`
 }
 
 // Limits bound resource usage so a single tool call cannot exhaust the
@@ -119,6 +120,7 @@ type Config struct {
 	RawTimeouts        rawTimeouts `yaml:"timeouts"`
 	RawIdleConnTimeout string      `yaml:"idle_connection_timeout"`
 	Accounts           []*Account  `yaml:"accounts"`
+	Redis              RedisConfig `yaml:"redis"`
 
 	// PublicURL is the absolute origin clients use to fetch attachments
 	// over HTTP. Empty means get_attachment will not mint a download_url
@@ -144,6 +146,10 @@ const (
 
 // Load reads, normalizes, and validates the config file at path.
 func Load(path string) (*Config, error) {
+	return loadConfig(path, true)
+}
+
+func loadConfig(path string, fromRedis bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
@@ -154,6 +160,16 @@ func Load(path string) (*Config, error) {
 	dec.KnownFields(false)
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if fromRedis {
+		if len(cfg.Accounts) > 0 {
+			return nil, fmt.Errorf("accounts in YAML are no longer supported; configure accounts in Redis mcp_accounts and remove the accounts section")
+		}
+		accounts, err := cfg.Redis.loadAccounts()
+		if err != nil {
+			return nil, err
+		}
+		cfg.Accounts = accounts
 	}
 
 	if err := cfg.normalize(); err != nil {
@@ -199,6 +215,9 @@ func (c *Config) normalize() error {
 	}
 
 	for i, acc := range c.Accounts {
+		if acc == nil {
+			return fmt.Errorf("account at index %d must be an object", i)
+		}
 		if err := acc.normalize(i); err != nil {
 			return err
 		}
@@ -306,9 +325,6 @@ func defaultSMTPSecurity(port int) Security {
 func (c *Config) validate() error {
 	if c.PublicURL != "" && !strings.HasPrefix(c.PublicURL, "http://") && !strings.HasPrefix(c.PublicURL, "https://") {
 		return fmt.Errorf("public_url must be an absolute http(s) URL, got %q", c.PublicURL)
-	}
-	if len(c.Accounts) == 0 {
-		return fmt.Errorf("no accounts configured")
 	}
 	seen := make(map[string]bool, len(c.Accounts))
 	for _, a := range c.Accounts {

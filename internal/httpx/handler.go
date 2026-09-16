@@ -7,9 +7,9 @@ import (
 
 const mcpPath = "/mcp"
 
-// Handler is the HTTP surface: bearer-authenticated /mcp, and
-// signed-URL /attachments/ for files get_attachment has already written.
-func Handler(apiKey string, logger *slog.Logger, trustProxy bool, getRPM, postRPM int, mcp, attachments http.Handler) http.Handler {
+// Handler exposes /mcp, signed attachment downloads, and optional account
+// management with its own authentication handler.
+func Handler(apiKey string, logger *slog.Logger, trustProxy bool, getRPM, postRPM int, mcp, attachments, accounts http.Handler) http.Handler {
 	limiter := NewRateLimiter(getRPM, postRPM, trustProxy)
 
 	wrap := func(inner http.Handler, bearer bool) http.Handler {
@@ -27,5 +27,10 @@ func Handler(apiKey string, logger *slog.Logger, trustProxy bool, getRPM, postRP
 	mux.Handle(mcpPath, mcpWrapped)
 	mux.Handle(mcpPath+"/", mcpWrapped)
 	mux.Handle(DownloadPrefix, wrap(attachments, false))
-	return OnlyPath(mux, mcpPath, DownloadPrefix)
+	if accounts != nil {
+		accountsWrapped := wrap(accounts, false)
+		mux.Handle(AccountsPath, accountsWrapped)
+		mux.Handle(AccountsPath+"/", accountsWrapped)
+	}
+	return OnlyPath(mux, mcpPath, DownloadPrefix, AccountsPath)
 }

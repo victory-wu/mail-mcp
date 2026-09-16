@@ -2,11 +2,11 @@
 
 An MCP server that gives AI agents controlled access to IMAP and SMTP mailboxes — read, search, organize, and send — without ever handing them your credentials.
 
-Written in Go. Single static binary, no runtime dependencies, ~20 MB resident.
+Written in Go. Single static binary, Redis account store, ~20 MB resident.
 
 ## Why credentials stay server-side
 
-The agent never sees a hostname, username, or password. Tools take an opaque `account_id`; the server resolves it against a local config file and makes the connection itself. Run it remotely and the model has no way to reconstruct how to reach your mailbox, even if it wanted to.
+The agent never sees a hostname, username, or password. Tools take an opaque `account_id`; the server resolves it against the server-side Redis account store and makes the connection itself. Run it remotely and the model has no way to reconstruct how to reach your mailbox, even if it wanted to.
 
 The same idea extends to message handles. A `message_id` is an opaque token encoding the account, folder, UIDVALIDITY, and UID together — so an agent cannot pair a handle from one mailbox with a different account, and a folder that gets renumbered produces a clear "this handle is stale" error instead of quietly acting on the wrong message.
 
@@ -43,23 +43,72 @@ cp config.example.yml config.yml
 ```
 
 ```yaml
-allow_send: false # opt in per account below
+allow_send: false
 allow_delete: false
-
-accounts:
-  - id: icloud
-    imap:
-      host: imap.mail.me.com
-      username: you@icloud.com
-      password: xxxx-xxxx-xxxx-xxxx # app-specific password
-    smtp:
-      host: smtp.mail.me.com
-      username: you@icloud.com
-      password: xxxx-xxxx-xxxx-xxxx
-    from_address: you@yourdomain.com
-    from_name: Your Name
-    allow_send: true
+redis:
+  addr: 127.0.0.1:6379
+  # username: default
+  # password: your-redis-password
+  db: 0
+  timeout: 10s
 ```
+
+Accounts live in the Redis Hash `mcp_accounts`. Each field is `hostname-email-uuid`, with a server-generated UUID v4. `hostname` is the calling machine's identifier, supplied by the caller; it is independent of `imap.host` and `smtp.host`. The email is the IMAP login address. The stored account ID equals its subkey. For Docker, use a Redis address reachable from the container.
+
+Normal startup only reads Redis and rejects YAML accounts. Empty stores are allowed so the management API can create the first account. Unavailable Redis or invalid account data prevents startup. Management APIs read and write current Redis data; MCP tools reload account changes on restart. No mailbox credentials are exposed through MCP tools.
+
+### Account management API
+
+Enable these HTTP endpoints with a separate startup key:
+
+```bash
+./bin/mail-mcp --config config.yml --accounts-api-key 'your-management-secret'
+```
+
+`ACCOUNTS_API_KEY` is the environment alternative; an explicit flag takes precedence. If neither is set, the management endpoints are disabled. `MCP_API_KEY` is still required for the HTTP service and authenticates `/mcp`; the management endpoints validate their own key. All three endpoints use:
+
+```http
+Authorization: Bearer your-management-secret
+```
+
+| Method | Path | Result |
+| --- | --- | --- |
+| POST | `/admin/accounts` | Create a Redis hash field; return `201` with `{"subkey":"hostname-email-uuid"}`. |
+| GET | `/admin/accounts?prefix=hostname-email` | Return `200` with `{"accounts":[{"subkey":"...","account":{...}}]}`; no matches gives an empty array. |
+| DELETE | `/admin/accounts/{subkey}` | Delete exactly the supplied field; return `204`, or `404` if absent. |
+
+Create request example (`Content-Type: application/json`):
+
+```json
+{
+  "hostname": "client-pc-01",
+  "email": "you@icloud.com",
+  "imap": {
+    "host": "imap.mail.me.com",
+    "port": 993,
+    "security": "tls",
+    "password": "your-app-password"
+  },
+  "smtp": {
+    "host": "smtp.mail.me.com",
+    "port": 587,
+    "security": "starttls",
+    "username": "you@icloud.com",
+    "password": "your-app-password"
+  },
+  "from_address": "you@yourdomain.com",
+  "from_name": "Your Name",
+  "allow_send": true,
+  "allow_delete": false,
+  "save_sent": true
+}
+```
+
+`hostname`, `email`, `imap.host`, and `imap.password` are required. `imap.username` is filled from `email`; if supplied it must match. Other endpoint defaults and per-account gates follow the normal configuration rules. The server generates `id`; callers cannot set it. Creation validates configuration without logging into the mailbox. Repeated creation generates distinct UUIDs and never overwrites an existing field.
+
+Query example: `/admin/accounts?prefix=client-pc-01-you%40icloud.com`. `prefix` is required and matched literally, case-sensitively, against the beginning of the complete subkey; it is not a Redis glob. URL-encode query values (especially `+` in email addresses) and subkeys in paths. The query returns full account configuration, including credentials, only to holders of the management key; responses use `Cache-Control: no-store`.
+
+Invalid input returns `400`, missing or incorrect management keys return `401`, and Redis operation failures return `503`. Request bodies are limited to 64 KiB. Deletion affects stored configuration only; it does not delete mailbox messages. Existing MCP account snapshots and pooled connections remain in use until restart.
 
 Most providers need an app-specific password rather than your account password — [iCloud](https://support.apple.com/en-us/102654), [Gmail](https://support.google.com/accounts/answer/185833), Fastmail, and Zoho all work this way.
 
@@ -162,6 +211,7 @@ For a client on the same machine, stdio skips the network entirely and needs no 
 | Variable              | Default      | Purpose                                                         |
 | --------------------- | ------------ | --------------------------------------------------------------- |
 | `MCP_API_KEY`         | —            | Bearer token. **Required** for HTTP; unused for stdio.           |
+| `ACCOUNTS_API_KEY` | empty | Independent management API bearer key; empty disables the endpoints. |
 | `CONFIG_PATH`         | `config.yml` | Path to the YAML config.                                         |
 | `TRANSPORT`           | `http`       | `http` or `stdio`.                                               |
 | `PORT` / `ADDR`       | `3000`       | Listen port or full address.                                     |
@@ -170,7 +220,7 @@ For a client on the same machine, stdio skips the network entirely and needs no 
 | `RATE_LIMIT_GET_RPM`  | `60`         | Per-client GET budget per minute.                                |
 | `RATE_LIMIT_POST_RPM` | `240`        | Per-client POST budget per minute.                               |
 
-Flags mirror these: `--config`, `--transport`, `--addr`, `--log-level`, `--trust-proxy`, `--version`.
+Flags mirror these: `--config`, `--transport`, `--addr`, `--log-level`, `--trust-proxy`, `--version`, `--accounts-api-key`.
 
 ### Config file
 
@@ -178,6 +228,11 @@ See [`config.example.yml`](config.example.yml) for the annotated version.
 
 | Key                          | Default        | Purpose                                                    |
 | ---------------------------- | -------------- | ---------------------------------------------------------- |
+| `redis.addr` | required | Redis server host:port. |
+| `redis.username` | empty | Redis ACL username. |
+| `redis.password` | empty | Redis authentication password. |
+| `redis.db` | `0` | Redis database number. |
+| `redis.timeout` | `10s` | Positive timeout for Redis connection and complete operation. |
 | `allow_send`                 | `false`        | Global send gate.                                          |
 | `allow_delete`               | `false`        | Global delete gate.                                        |
 | `limits.max_body_chars`      | `50000`        | Per-part body truncation.                                  |
@@ -187,17 +242,17 @@ See [`config.example.yml`](config.example.yml) for the annotated version.
 | `public_url`                 | empty          | Origin used to mint `download_url`. Empty disables it.     |
 | `idle_connection_timeout`    | `24h`          | Close pooled IMAP connections idle for this duration.      |
 | `timeouts.*`                 | see example    | `imap_connect`, `imap_command`, `smtp_connect`, `smtp_send`. |
-| `accounts[].allow_send`      | inherits global| Per-account send gate.                                     |
-| `accounts[].allow_delete`    | inherits global| Per-account delete gate.                                   |
-| `accounts[].save_sent`       | provider-aware | Force the Sent-folder copy on or off.                      |
+| `Redis account: allow_send`      | inherits global| Per-account send gate.                                     |
+| `Redis account: allow_delete`    | inherits global| Per-account delete gate.                                   |
+| `Redis account: save_sent`       | provider-aware | Force the Sent-folder copy on or off.                      |
 
-Configs written for poke-mail v1 still load: the flat `imap_host` / `smtp_username` style keys are folded into the nested form automatically.
+Redis account values support legacy poke-mail v1 account fields: the flat `imap_host` / `smtp_username` style keys are folded into the nested form automatically.
 
 ## Security
 
 - **Authentication is mandatory** on HTTP. No token, no start.
 - **Credentials never leave the server.** Tools receive ids, not connection details.
-- **Everything outside `/mcp` returns an empty 404**, revealing nothing to scanners.
+- **Only declared routes are exposed:** `/mcp`, signed `/attachments/` downloads, and optionally `/admin/accounts` with its separate management key.
 - **TLS is mandatory for STARTTLS accounts.** No opportunistic fallback to plaintext, which would send your password in the clear.
 - **Rate limited per client**, with separate GET and POST budgets so polling cannot starve real work. `X-Forwarded-For` is ignored unless you declare a trusted proxy, since otherwise any caller could spoof it.
 - **Attachment filenames are sanitized** before touching the filesystem — path separators, traversal segments, and control characters are stripped.

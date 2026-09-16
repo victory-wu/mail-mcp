@@ -9,6 +9,9 @@ Guidance for coding agents working in `mail-mcp`.
 - Domain: IMAP + SMTP mailbox access exposed over MCP
 - Transports: Streamable HTTP (default, bearer-authenticated) and stdio
 - Entry point: `cmd/mail-mcp/main.go`
+- Accounts load at startup from Redis hash `mcp_accounts`: field is `hostname-email-uuid` (UUID v4), value is the account JSON using snake_case keys. `hostname` is the caller-supplied host identifier, independent of IMAP/SMTP hosts; email is `imap.username`. Account ID equals subkey. Restart for MCP tools to reload Redis changes. Empty stores can start for initial provisioning.
+- YAML contains `redis.addr` (required), `redis.username`, `redis.password`, `redis.db` (default 0), and `redis.timeout` (default 10s, positive). Startup rejects YAML accounts; manage account configuration directly in Redis.
+- Account management HTTP endpoints use `--accounts-api-key` (or `ACCOUNTS_API_KEY`) as their independent Bearer secret; unset disables them. POST `/admin/accounts` creates an account, GET `/admin/accounts?prefix=hostname-email` matches literal case-sensitive subkey prefixes, DELETE `/admin/accounts/{subkey}` deletes exactly one field. These administrative endpoints return full configuration; MCP tools must never expose credentials.
 
 ## Commands
 
@@ -50,13 +53,13 @@ Do not skip vet or tests for code changes.
 | Package | Responsibility |
 | --- | --- |
 | `cmd/mail-mcp` | Flags, transport selection, HTTP wiring, graceful shutdown |
-| `internal/config` | YAML loading, defaults, validation, account resolution, gates |
+| `internal/config` | YAML loading, Redis account store, defaults, validation, account resolution, gates |
 | `internal/msgid` | Opaque message handle encode/parse |
 | `internal/mailmime` | MIME parsing, body extraction, sanitization, attachment extraction |
 | `internal/mailbox` | IMAP connection pool and operations |
 | `internal/send` | SMTP composition, delivery, validation |
 | `internal/tools` | MCP tool definitions and handlers |
-| `internal/httpx` | Bearer auth, rate limiting, route filtering, security headers, signed attachment downloads |
+| `internal/httpx` | Bearer auth, rate limiting, route filtering, security headers, signed attachment downloads, account management REST endpoints |
 
 Keep the layering one-directional: `tools` depends on `mailbox`/`send`/`config`/`httpx`, never the reverse. `httpx` must not import `tools`.
 

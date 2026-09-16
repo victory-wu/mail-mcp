@@ -1,6 +1,6 @@
 // Command mail-mcp serves IMAP and SMTP mailboxes to AI agents over MCP.
 //
-// Credentials live in a server-side config file and never reach the client:
+// Credentials live in server-side Redis and never reach the client:
 // tools take an opaque account_id, and the server resolves it locally.
 package main
 
@@ -47,12 +47,13 @@ func main() {
 
 func run() error {
 	var (
-		configPath  = flag.String("config", envOr("CONFIG_PATH", "config.yml"), "path to the YAML config file")
-		addr        = flag.String("addr", envOr("ADDR", ":"+envOr("PORT", "3000")), "address to listen on")
-		transport   = flag.String("transport", envOr("TRANSPORT", "http"), "transport: http or stdio")
-		logLevel    = flag.String("log-level", envOr("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
-		trustProxy  = flag.Bool("trust-proxy", envBool("TRUST_PROXY", false), "trust X-Forwarded-For for rate limiting; only enable behind a proxy you control")
-		showVersion = flag.Bool("version", false, "print the version and exit")
+		configPath     = flag.String("config", envOr("CONFIG_PATH", "config.yml"), "path to the YAML config file")
+		addr           = flag.String("addr", envOr("ADDR", ":"+envOr("PORT", "3000")), "address to listen on")
+		transport      = flag.String("transport", envOr("TRANSPORT", "http"), "transport: http or stdio")
+		logLevel       = flag.String("log-level", envOr("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
+		trustProxy     = flag.Bool("trust-proxy", envBool("TRUST_PROXY", false), "trust X-Forwarded-For for rate limiting; only enable behind a proxy you control")
+		showVersion    = flag.Bool("version", false, "print the version and exit")
+		accountsAPIKey = flag.String("accounts-api-key", envOr("ACCOUNTS_API_KEY", ""), "bearer key for account management HTTP endpoints; empty disables them")
 	)
 	flag.Parse()
 
@@ -95,13 +96,13 @@ func run() error {
 		logger.Info("serving on stdio", "version", version)
 		return srv.Run(ctx, &mcp.StdioTransport{})
 	case "http":
-		return serveHTTP(ctx, srv, cfg, logger, *addr, *trustProxy, apiKey)
+		return serveHTTP(ctx, srv, cfg, logger, *addr, *trustProxy, apiKey, *accountsAPIKey)
 	default:
 		return fmt.Errorf("unknown transport %q: use http or stdio", *transport)
 	}
 }
 
-func serveHTTP(ctx context.Context, srv *mcp.Server, cfg *config.Config, logger *slog.Logger, addr string, trustProxy bool, apiKey string) error {
+func serveHTTP(ctx context.Context, srv *mcp.Server, cfg *config.Config, logger *slog.Logger, addr string, trustProxy bool, apiKey, accountsAPIKey string) error {
 	// No token, no server. This process can read and send a person's mail;
 	// starting it open to the network would be indefensible.
 	if apiKey == "" {
@@ -117,11 +118,20 @@ func serveHTTP(ctx context.Context, srv *mcp.Server, cfg *config.Config, logger 
 		&mcp.StreamableHTTPOptions{Logger: logger, Stateless: true},
 	)
 	attachments := httpx.AttachmentHandler(apiKey, cfg.Limits.AttachmentDir, logger)
+	var accounts http.Handler
+	if accountsAPIKey != "" {
+		store, err := cfg.Redis.AccountStore()
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		accounts = httpx.AccountsHandler(accountsAPIKey, store, logger)
+	}
 	handler := httpx.Handler(
 		apiKey, logger, trustProxy,
 		envInt("RATE_LIMIT_GET_RPM", 60),
 		envInt("RATE_LIMIT_POST_RPM", 240),
-		mcpHandler, attachments,
+		mcpHandler, attachments, accounts,
 	)
 
 	httpServer := &http.Server{
