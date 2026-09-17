@@ -106,13 +106,6 @@ func (s *Server) deleteEmail(ctx context.Context, _ *mcp.CallToolRequest, in del
 			"delete_email requires confirm: true. Ask the user to confirm the deletion, " +
 				"or use archive_email if they only want it out of the inbox")
 	}
-	_, acc, err := s.resolveMessage(in.MessageID)
-	if err != nil {
-		return nil, moveOutput{}, err
-	}
-	if err := s.requireDelete(acc); err != nil {
-		return nil, moveOutput{}, err
-	}
 	return s.relocate(ctx, in.MessageID, relocateOptions{
 		role:          "trash",
 		fallbackName:  "Trash",

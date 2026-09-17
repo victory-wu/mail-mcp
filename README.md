@@ -6,7 +6,7 @@ Written in Go. Single static binary, Redis account store, ~20 MB resident.
 
 ## Why credentials stay server-side
 
-The agent never sees a hostname, username, or password. Tools take an opaque `account_id`; the server resolves it against the server-side Redis account store and makes the connection itself. Run it remotely and the model has no way to reconstruct how to reach your mailbox, even if it wanted to.
+The agent never sees a hostname, username, or password. The HTTP Authorization header selects the account from the startup Redis snapshot; tools do not accept an `account_id` parameter. The server makes the mailbox connection itself. Run it remotely and the model has no way to reconstruct how to reach your mailbox, even if it wanted to.
 
 The same idea extends to message handles. A `message_id` is an opaque token encoding the account, folder, UIDVALIDITY, and UID together — so an agent cannot pair a handle from one mailbox with a different account, and a folder that gets renumbered produces a clear "this handle is stale" error instead of quietly acting on the wrong message.
 
@@ -18,7 +18,6 @@ The same idea extends to message handles. A `message_id` is an opaque token enco
 docker run -d --name mail-mcp \
   -p 3000:3000 \
   -v "$PWD/config.yml:/config.yml:ro" \
-  -e MCP_API_KEY="$(openssl rand -hex 32)" \
   ghcr.io/kacperkwapisz/mail-mcp:latest
 ```
 
@@ -27,7 +26,7 @@ docker run -d --name mail-mcp \
 ```bash
 git clone https://github.com/kacperkwapisz/mail-mcp.git
 cd mail-mcp
-make build          # → bin/mail-mcp
+make build          # → bin/mail-mcp + doc/swagger.json + doc/swagger.yaml
 ```
 
 ### Binaries
@@ -43,8 +42,6 @@ cp config.example.yml config.yml
 ```
 
 ```yaml
-allow_send: false
-allow_delete: false
 redis:
   addr: 127.0.0.1:6379
   # username: default
@@ -62,10 +59,10 @@ Normal startup only reads Redis and rejects YAML accounts. Empty stores are allo
 Enable these HTTP endpoints with a separate startup key:
 
 ```bash
-./bin/mail-mcp --config config.yml --accounts-api-key 'your-management-secret'
+./bin/mail-mcp --config config.yml --backend-api-key 'your-management-secret'
 ```
 
-`ACCOUNTS_API_KEY` is the environment alternative; an explicit flag takes precedence. If neither is set, the management endpoints are disabled. `MCP_API_KEY` is still required for the HTTP service and authenticates `/mcp`; the management endpoints validate their own key. All three endpoints use:
+`BACKEND_API_KEY` is the environment alternative; an explicit flag takes precedence. The management endpoints validate their own key; `/mcp` instead requires an account's complete subkey as its Bearer token. All three management endpoints use:
 
 ```http
 Authorization: Bearer your-management-secret
@@ -98,13 +95,11 @@ Create request example (`Content-Type: application/json`):
   },
   "from_address": "you@yourdomain.com",
   "from_name": "Your Name",
-  "allow_send": true,
-  "allow_delete": false,
   "save_sent": true
 }
 ```
 
-`hostname`, `email`, `imap.host`, and `imap.password` are required. `imap.username` is filled from `email`; if supplied it must match. Other endpoint defaults and per-account gates follow the normal configuration rules. The server generates `id`; callers cannot set it. Creation validates configuration without logging into the mailbox. Repeated creation generates distinct UUIDs and never overwrites an existing field.
+`hostname`, `email`, `imap.host`, and `imap.password` are required. `imap.username` is filled from `email`; if supplied it must match. Other endpoint defaults follow the normal configuration rules. The server generates `id`; callers cannot set it. Creation validates configuration without logging into the mailbox. Repeated creation generates distinct UUIDs and never overwrites an existing field.
 
 Query example: `/admin/accounts?prefix=client-pc-01-you%40icloud.com`. `prefix` is required and matched literally, case-sensitively, against the beginning of the complete subkey; it is not a Redis glob. URL-encode query values (especially `+` in email addresses) and subkeys in paths. The query returns full account configuration, including credentials, only to holders of the management key; responses use `Cache-Control: no-store`.
 
@@ -114,14 +109,15 @@ Most providers need an app-specific password rather than your account password �
 
 SMTP inherits the IMAP host and credentials when omitted, and connection security is inferred from the port (993 → TLS, 143 → STARTTLS, 465 → TLS, 587 → STARTTLS) unless you set `security` explicitly.
 
-**2. Generate a token and run.**
+**2. Run the server.**
 
 ```bash
-export MCP_API_KEY=$(openssl rand -hex 32)
 ./bin/mail-mcp --config config.yml
 ```
 
-The HTTP transport refuses to start without `MCP_API_KEY`. There is no unauthenticated mode — this process can read and send your mail.
+No global MCP API key is required. Every `/mcp` request must carry `Authorization: Bearer <subkey>`, using an exact, case-sensitive subkey from the accounts loaded at startup. Missing or unknown subkeys return `401`. Empty account stores can start for provisioning, but no MCP requests are authorized until accounts are loaded after a restart.
+
+The subkey is an access credential: your application must return it only to the authorized user after login. Keep subkeys and message handles private (handles encode the account subkey). Possession of a subkey grants access to that mailbox; this server does not independently verify your application's login session. Account creation, changes, and deletion take effect for MCP after restart, including credential revocation.
 
 **3. Verify.**
 
@@ -129,22 +125,9 @@ The HTTP transport refuses to start without `MCP_API_KEY`. There is no unauthent
 npx @modelcontextprotocol/inspector
 ```
 
-Connect to `http://localhost:3000/mcp` over Streamable HTTP with an `Authorization: Bearer <MCP_API_KEY>` header, then call `verify_account` to confirm both IMAP and SMTP authenticate.
+Connect to `http://localhost:3000/mcp` over Streamable HTTP with an `Authorization: Bearer <subkey>` header. Call `list_accounts` to discover the authorized mailbox, then call `verify_account` with `{}`. All tool calls automatically use the authenticated account; omit `account_id`. Discovery and all account or message operations are restricted to that mailbox; another account's message handle cannot expand access. The account-management key does not grant MCP access.
 
-### Local use
-
-For a client on the same machine, stdio skips the network entirely and needs no token:
-
-```jsonc
-{
-  "mcpServers": {
-    "mail": {
-      "command": "/usr/local/bin/mail-mcp",
-      "args": ["--config", "/etc/mail-mcp/config.yml", "--transport", "stdio"]
-    }
-  }
-}
-```
+Only Streamable HTTP is supported, including for local clients. The `--transport` flag and `TRANSPORT` setting have been removed.
 
 ## Tools
 
@@ -188,6 +171,8 @@ For a client on the same machine, stdio skips the network entirely and needs no 
 
 **Attachment bytes never enter the response.** `read_email` returns attachment metadata with a `part_id`; `get_attachment` writes the file to disk and returns `file_path` (on the server) plus, when `public_url` is set, a 15-minute signed `download_url`. A remote agent curls that URL onto its own machine. A 7 MB PDF base64-encoded into a tool result would blow the context window without accomplishing anything.
 
+HTTP attachment files use account-specific prefixes and unique filenames. `output_dir` must be omitted or equal the configured attachment directory; outgoing `file_path` attachments must belong to the authenticated account in that directory. Use `content_base64` for other outgoing files. Download links use an automatically generated server-only signing secret, expire after 15 minutes, and become invalid on restart. Anyone holding a valid download link can fetch that one file without a Bearer header.
+
 **Bodies are truncated and HTML is opt-in.** Message HTML is attacker-controlled and enormous. It is sanitized through bluemonday before it is ever returned, and omitted entirely unless `include_html` is set. Messages with no plain-text part get one derived from the HTML, with paragraph breaks preserved.
 
 **One pooled IMAP connection per account.** A TLS handshake plus LOGIN on every tool call is the single biggest source of latency in servers of this kind. Connections are kept authenticated, health-checked with NOOP after idling, and reconnected transparently. A background cleanup task closes connections that have not been accessed for `idle_connection_timeout` (24 hours by default) without interrupting active commands. Operations on one account are serialized, since IMAP's selected-mailbox state makes ordering matter; different accounts run concurrently.
@@ -202,7 +187,6 @@ For a client on the same machine, stdio skips the network entirely and needs no 
 
 **Folder roles come from the server, not a name list.** SPECIAL-USE attributes are used where available, with a localized name table as fallback — so a Polish "Wysłane" or a Gmail "[Gmail]/Sent Mail" is recognized as Sent rather than triggering the creation of a duplicate folder.
 
-**Destructive operations are gated twice.** `allow_delete` is false by default, and even when enabled `delete_email` requires `confirm: true` per call and moves to Trash rather than expunging. `delete_folder` additionally refuses INBOX and any special-use folder.
 
 ## Configuration reference
 
@@ -210,17 +194,15 @@ For a client on the same machine, stdio skips the network entirely and needs no 
 
 | Variable              | Default      | Purpose                                                         |
 | --------------------- | ------------ | --------------------------------------------------------------- |
-| `MCP_API_KEY`         | —            | Bearer token. **Required** for HTTP; unused for stdio.           |
-| `ACCOUNTS_API_KEY` | empty | Independent management API bearer key; empty disables the endpoints. |
+| `BACKEND_API_KEY` | empty | Independent management API bearer key; empty disables the endpoints. |
 | `CONFIG_PATH`         | `config.yml` | Path to the YAML config.                                         |
-| `TRANSPORT`           | `http`       | `http` or `stdio`.                                               |
 | `PORT` / `ADDR`       | `3000`       | Listen port or full address.                                     |
 | `LOG_LEVEL`           | `info`       | `debug`, `info`, `warn`, `error`.                                |
 | `TRUST_PROXY`         | `false`      | Trust `X-Forwarded-For` for rate limiting.                       |
 | `RATE_LIMIT_GET_RPM`  | `60`         | Per-client GET budget per minute.                                |
 | `RATE_LIMIT_POST_RPM` | `240`        | Per-client POST budget per minute.                               |
 
-Flags mirror these: `--config`, `--transport`, `--addr`, `--log-level`, `--trust-proxy`, `--version`, `--accounts-api-key`.
+Flags mirror these: `--config`, `--addr`, `--log-level`, `--trust-proxy`, `--version`, `--backend-api-key`.
 
 ### Config file
 
@@ -233,8 +215,6 @@ See [`config.example.yml`](config.example.yml) for the annotated version.
 | `redis.password` | empty | Redis authentication password. |
 | `redis.db` | `0` | Redis database number. |
 | `redis.timeout` | `10s` | Positive timeout for Redis connection and complete operation. |
-| `allow_send`                 | `false`        | Global send gate.                                          |
-| `allow_delete`               | `false`        | Global delete gate.                                        |
 | `limits.max_body_chars`      | `50000`        | Per-part body truncation.                                  |
 | `limits.max_search_results`  | `100`          | Largest search page.                                       |
 | `limits.max_attachment_bytes`| `26214400`     | Attachment size ceiling.                                   |
@@ -242,15 +222,15 @@ See [`config.example.yml`](config.example.yml) for the annotated version.
 | `public_url`                 | empty          | Origin used to mint `download_url`. Empty disables it.     |
 | `idle_connection_timeout`    | `24h`          | Close pooled IMAP connections idle for this duration.      |
 | `timeouts.*`                 | see example    | `imap_connect`, `imap_command`, `smtp_connect`, `smtp_send`. |
-| `Redis account: allow_send`      | inherits global| Per-account send gate.                                     |
-| `Redis account: allow_delete`    | inherits global| Per-account delete gate.                                   |
 | `Redis account: save_sent`       | provider-aware | Force the Sent-folder copy on or off.                      |
 
 Redis account values support legacy poke-mail v1 account fields: the flat `imap_host` / `smtp_username` style keys are folded into the nested form automatically.
 
+Sending and deletion have no configuration gates. `delete_email` still requires `confirm: true` and moves messages to Trash; `delete_folder` refuses INBOX and special-use folders.
+
 ## Security
 
-- **Authentication is mandatory** on HTTP. No token, no start.
+- **Authentication is mandatory** for `/mcp`: use the account subkey as the Bearer token. Each token is restricted to its mailbox; no global MCP key is configured.
 - **Credentials never leave the server.** Tools receive ids, not connection details.
 - **Only declared routes are exposed:** `/mcp`, signed `/attachments/` downloads, and optionally `/admin/accounts` with its separate management key.
 - **TLS is mandatory for STARTTLS accounts.** No opportunistic fallback to plaintext, which would send your password in the clear.
@@ -275,3 +255,9 @@ make docker
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+### Swagger documentation
+
+`make build` generates Swagger 2.0 documents for the account management REST API in `doc/swagger.json` and `doc/swagger.yaml` before building the binary. Run `make swagger` to regenerate only the documentation. Swaggo is pinned in the Makefile and runs through `go run`; no global installation is required. The first run requires access to the Go module proxy to download the generator.
+
+The generated documents include create, prefix-query, and delete endpoints, request/response schemas, and the management Bearer key definition. Import either document into Swagger Editor or an API client. MCP JSON-RPC tools use MCP tool discovery and are not modeled as REST endpoints in this document. Maintain the Swaggo annotations alongside the HTTP handlers when changing these APIs.

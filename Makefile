@@ -2,21 +2,22 @@ BINARY  := mail-mcp
 PKG     := ./cmd/mail-mcp
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
+SWAG_VERSION := v1.16.6
 
 .DEFAULT_GOAL := check
 
 .PHONY: build
-build: ## Build the binary into bin/
+build: swagger ## Build the binary into bin/ and Swagger documents into doc/
 	@mkdir -p bin
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(PKG)
+
+.PHONY: swagger
+swagger: ## Generate doc/swagger.json and doc/swagger.yaml
+	go run github.com/swaggo/swag/cmd/swag@$(SWAG_VERSION) init -g main.go -d cmd/mail-mcp,internal/httpx,internal/config --parseInternal --output doc --outputTypes json,yaml
 
 .PHONY: run
 run: ## Run against config.yml
 	go run $(PKG) --config config.yml
-
-.PHONY: stdio
-stdio: ## Run on the stdio transport (no bearer token needed)
-	go run $(PKG) --config config.yml --transport stdio
 
 .PHONY: test
 test: ## Run the test suite
@@ -51,7 +52,7 @@ docker: ## Build the container image
 	docker build --build-arg VERSION=$(VERSION) -t $(BINARY):$(VERSION) -t $(BINARY):latest .
 
 .PHONY: token
-token: ## Generate an MCP_API_KEY
+token: ## Generate a backend management API key
 	@openssl rand -hex 32
 
 .PHONY: clean

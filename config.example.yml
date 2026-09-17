@@ -6,24 +6,9 @@
 #
 #   cp config.example.yml config.yml
 
-# ---------------------------------------------------------------------------
-# Global gates
-#
-# Both default to false. An agent can always read, search, organize, and save
-# drafts; sending and deleting are opt-in.
-# ---------------------------------------------------------------------------
-
-# Allow send_email, reply_email, and forward_email.
-# With this false, agents must use create_draft and you send it yourself.
-allow_send: false
-
-# Allow delete_email and delete_folder. Even when true, delete_email only
-# moves messages to Trash and still requires confirm: true on every call.
-allow_delete: false
-
 # Absolute origin used to mint get_attachment download URLs. Required for
 # remote agents: file_path is on this host, so they fetch download_url with
-# curl instead. Leave empty for stdio. Links expire after 15 minutes.
+# curl instead. Leave empty to disable download URLs. Links expire after 15 minutes.
 # public_url: https://mail-mcp.example.com
 
 # Close pooled IMAP connections after this much time without access. The
@@ -45,6 +30,7 @@ limits:
   max_attachment_bytes: 26214400 # 25 MiB
 
   # Where get_attachment writes files. Defaults to the system temp directory.
+  # HTTP clients may only write here and attach their own account's files.
   # attachment_dir: /var/lib/mail-mcp/attachments
 
 # ---------------------------------------------------------------------------
@@ -61,7 +47,7 @@ timeouts:
 # ---------------------------------------------------------------------------
 # Account store — accounts are loaded from the mcp_accounts Redis hash.
 # Field: caller hostname-login email-UUID v4; value: account JSON (see README).
-# Enable management APIs with --accounts-api-key or ACCOUNTS_API_KEY.
+# Enable management APIs with --backend-api-key or BACKEND_API_KEY.
 # Management APIs read/write Redis immediately; restart for MCP tools to reload.
 # ---------------------------------------------------------------------------
 redis:

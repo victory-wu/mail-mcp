@@ -7,11 +7,12 @@ Guidance for coding agents working in `mail-mcp`.
 - Language: Go (1.25)
 - Module: `github.com/kacperkwapisz/mail-mcp`
 - Domain: IMAP + SMTP mailbox access exposed over MCP
-- Transports: Streamable HTTP (default, bearer-authenticated) and stdio
+- Transport: Streamable HTTP only (bearer-authenticated); no --transport flag or TRANSPORT setting
+- HTTP `/mcp` authenticates with `Authorization: Bearer <subkey>` against the startup account snapshot, with exact case-sensitive matching. No global MCP API key is used. Each HTTP MCP server instance receives a private config containing only the authenticated account, including discovery and message-handle resolution. Subkeys and message handles are sensitive access credentials. Account changes and revocations take effect after restart. Tool inputs do not accept account_id; authentication selects the account.
 - Entry point: `cmd/mail-mcp/main.go`
 - Accounts load at startup from Redis hash `mcp_accounts`: field is `hostname-email-uuid` (UUID v4), value is the account JSON using snake_case keys. `hostname` is the caller-supplied host identifier, independent of IMAP/SMTP hosts; email is `imap.username`. Account ID equals subkey. Restart for MCP tools to reload Redis changes. Empty stores can start for initial provisioning.
 - YAML contains `redis.addr` (required), `redis.username`, `redis.password`, `redis.db` (default 0), and `redis.timeout` (default 10s, positive). Startup rejects YAML accounts; manage account configuration directly in Redis.
-- Account management HTTP endpoints use `--accounts-api-key` (or `ACCOUNTS_API_KEY`) as their independent Bearer secret; unset disables them. POST `/admin/accounts` creates an account, GET `/admin/accounts?prefix=hostname-email` matches literal case-sensitive subkey prefixes, DELETE `/admin/accounts/{subkey}` deletes exactly one field. These administrative endpoints return full configuration; MCP tools must never expose credentials.
+- Account management HTTP endpoints use `--backend-api-key` (or `BACKEND_API_KEY`) as their independent Bearer secret; unset disables them. POST `/admin/accounts` creates an account, GET `/admin/accounts?prefix=hostname-email` matches literal case-sensitive subkey prefixes, DELETE `/admin/accounts/{subkey}` deletes exactly one field. These administrative endpoints return full configuration; MCP tools must never expose credentials.
 
 ## Commands
 
@@ -20,8 +21,8 @@ Run from the repo root.
 | Task | Command |
 | --- | --- |
 | Build | `make build` (or `go build ./...`) |
+| Swagger docs | `make swagger` (also runs with `make build`; outputs `doc/swagger.json` and `doc/swagger.yaml`) |
 | Run | `make run` |
-| Run on stdio | `make stdio` |
 | Test | `go test ./...` |
 | Test with race detector | `make race` |
 | Coverage | `make cover` |
@@ -52,7 +53,7 @@ Do not skip vet or tests for code changes.
 
 | Package | Responsibility |
 | --- | --- |
-| `cmd/mail-mcp` | Flags, transport selection, HTTP wiring, graceful shutdown |
+| `cmd/mail-mcp` | Flags, HTTP wiring, graceful shutdown |
 | `internal/config` | YAML loading, Redis account store, defaults, validation, account resolution, gates |
 | `internal/msgid` | Opaque message handle encode/parse |
 | `internal/mailmime` | MIME parsing, body extraction, sanitization, attachment extraction |
@@ -67,7 +68,7 @@ Keep the layering one-directional: `tools` depends on `mailbox`/`send`/`config`/
 
 ### Credentials never cross the tool boundary
 
-Tool inputs and outputs carry `account_id`, never a host, username, or password. `internal/tools/tools_test.go` asserts this. If you add a field to any output struct, make sure it cannot carry connection details.
+Tool inputs never accept `account_id`; use the authenticated account. Outputs may carry `account_id`, never a host, username, or password. `internal/tools/tools_test.go` asserts this. If you add a field to any output struct, make sure it cannot carry connection details.
 
 ### Message handles are opaque and self-contained
 
@@ -77,13 +78,13 @@ A `message_id` encodes account + mailbox + UIDVALIDITY + UID. Consequences:
 - Every operation on a handle must call `Session.SelectFor`, which re-checks UIDVALIDITY.
 - The encoding in `msgid.Encode` is persisted by agents across turns. Changing it invalidates every cached handle, so treat it as a wire format.
 
-### Gates default closed
+### Sending and deletion
 
-`allow_send` and `allow_delete` are false unless configured. `delete_email` additionally requires `confirm: true`. Never add a code path that sends or deletes without passing through `requireSend` / `requireDelete`.
+Sending and deletion have no configuration gates. `delete_email` still requires `confirm: true`, and special-use folder protections remain enforced.
 
 ### Attachment bytes stay out of responses
 
-`read_email` returns metadata only. `get_attachment` writes to disk and returns `file_path` plus, when `public_url` is set, a 15-minute HMAC `download_url`. Do not add an option that inlines attachment content into a tool result. The download token is HMAC-SHA256 of expiry+filename keyed with `MCP_API_KEY`; verification failures are 404, never 401, so scanners learn nothing.
+`read_email` returns metadata only. `get_attachment` writes to disk and returns `file_path` plus, when `public_url` is set, a 15-minute HMAC `download_url`. Do not add an option that inlines attachment content into a tool result. The download token is HMAC-SHA256 of expiry+filename keyed with a server-only random secret generated at HTTP startup; restart invalidates existing links. Never use a client-known subkey as the signing secret. Verification failures are 404, never 401, so scanners learn nothing. HTTP attachment filenames have account-specific prefixes and random components; output directories are restricted to the configured directory, and outgoing file paths must resolve to that account's files there.
 
 ### Send validation precedes the network
 
@@ -106,7 +107,7 @@ Three groups, separated by blank lines, in order:
 ### Errors
 
 - Wrap with `%w` and enough context to act on: which account, which folder, which address.
-- Error strings are read by an LLM. Say what went wrong *and* what to do instead — see `requireSend` for the tone.
+- Error strings are read by an LLM. Say what went wrong *and* what to do instead.
 - Never `panic` in a request path. `Pool.Do` recovers, but do not rely on it.
 - Return errors from tool handlers rather than encoding failure in the output struct, so the SDK marks the result `IsError` and the model can self-correct.
 

@@ -12,22 +12,18 @@ import (
 )
 
 type listFoldersInput struct {
-	accountInput
 }
 
 type createFolderInput struct {
-	accountInput
 	Name string `json:"name" jsonschema:"folder name; use the account's hierarchy delimiter for nesting, e.g. INBOX/Projects"`
 }
 
 type renameFolderInput struct {
-	accountInput
 	OldName string `json:"old_name" jsonschema:"current folder name"`
 	NewName string `json:"new_name" jsonschema:"new folder name"`
 }
 
 type deleteFolderInput struct {
-	accountInput
 	Name    string `json:"name" jsonschema:"folder to delete"`
 	Confirm bool   `json:"confirm" jsonschema:"must be true. Deleting a folder discards every message in it and cannot be undone"`
 }
@@ -77,7 +73,7 @@ func (s *Server) registerFolders(srv *mcp.Server) {
 }
 
 func (s *Server) listFolders(ctx context.Context, _ *mcp.CallToolRequest, in listFoldersInput) (*mcp.CallToolResult, listFoldersOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
 		return nil, listFoldersOutput{}, err
 	}
@@ -99,7 +95,7 @@ func (s *Server) listFolders(ctx context.Context, _ *mcp.CallToolRequest, in lis
 }
 
 func (s *Server) createFolder(ctx context.Context, _ *mcp.CallToolRequest, in createFolderInput) (*mcp.CallToolResult, folderOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
 		return nil, folderOutput{}, err
 	}
@@ -123,7 +119,7 @@ func (s *Server) createFolder(ctx context.Context, _ *mcp.CallToolRequest, in cr
 }
 
 func (s *Server) renameFolder(ctx context.Context, _ *mcp.CallToolRequest, in renameFolderInput) (*mcp.CallToolResult, folderOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
 		return nil, folderOutput{}, err
 	}
@@ -150,11 +146,8 @@ func (s *Server) renameFolder(ctx context.Context, _ *mcp.CallToolRequest, in re
 }
 
 func (s *Server) deleteFolder(ctx context.Context, _ *mcp.CallToolRequest, in deleteFolderInput) (*mcp.CallToolResult, folderOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
-		return nil, folderOutput{}, err
-	}
-	if err := s.requireDelete(acc); err != nil {
 		return nil, folderOutput{}, err
 	}
 	if !in.Confirm {

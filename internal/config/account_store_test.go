@@ -63,8 +63,6 @@ func TestAccountStoreLifecycle(t *testing.T) {
 	s := &RedisAccountStore{client: m, timeout: time.Second}
 	ctx := context.Background()
 	in := validCreateInput()
-	deny := false
-	in.AllowSend = &deny
 	first, err := s.Create(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -87,9 +85,6 @@ func TestAccountStoreLifecycle(t *testing.T) {
 	for _, record := range results {
 		if record.Account.IMAP.Host != "imap.example.com" || record.Account.Hostname != "caller-host" {
 			t.Fatal("caller hostname must be independent of mail host")
-		}
-		if record.Account.AllowSend == nil || *record.Account.AllowSend {
-			t.Fatal("explicit false gate was lost")
 		}
 		if record.Subkey != record.Account.ID {
 			t.Fatal("subkey and ID diverged")

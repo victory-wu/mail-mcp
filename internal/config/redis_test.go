@@ -7,7 +7,7 @@ import (
 )
 
 func TestAccountJSONRoundTrip(t *testing.T) {
-	cfg := loadOK(t, minimal+"    allow_send: false\n    allow_delete: true\n    save_sent: false\n    from_address: alias@example.com\n    from_name: Test User\n")
+	cfg := loadOK(t, minimal+"    save_sent: false\n    from_address: alias@example.com\n    from_name: Test User\n")
 	cfg.Accounts[0].Hostname = "client-host"
 	cfg.Accounts[0].ID = "client-host-me@example.com-550e8400-e29b-41d4-a716-446655440000"
 	data, err := json.Marshal(cfg.Accounts[0])
@@ -16,8 +16,8 @@ func TestAccountJSONRoundTrip(t *testing.T) {
 	}
 	raw := string(data)
 	values := map[string]string{cfg.Accounts[0].ID: raw}
-	if !strings.Contains(raw, `"from_address":"alias@example.com"`) || !strings.Contains(raw, `"allow_send":false`) {
-		t.Fatalf("JSON must retain snake_case fields and explicit false gates")
+	if !strings.Contains(raw, `"from_address":"alias@example.com"`) || !strings.Contains(raw, `"save_sent":false`) {
+		t.Fatalf("JSON must retain snake_case fields and explicit false values")
 	}
 	accounts, err := decodeAccounts(values)
 	if err != nil {
@@ -77,7 +77,7 @@ func TestEmptyAccountStoreCanStart(t *testing.T) {
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("empty store: %v", err)
 	}
-	if _, err := loadConfig(write(t, "allow_send: false"), false); err != nil {
+	if _, err := loadConfig(write(t, "limits: {}"), false); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -86,7 +86,7 @@ func TestLoadRequiresRedis(t *testing.T) {
 	if _, err := Load(write(t, minimal)); err == nil || !strings.Contains(err.Error(), "configure accounts in Redis") {
 		t.Fatalf("expected Redis configuration guidance: %v", err)
 	}
-	if _, err := Load(write(t, "allow_send: false")); err == nil || !strings.Contains(err.Error(), "redis.addr") {
+	if _, err := Load(write(t, "limits: {}")); err == nil || !strings.Contains(err.Error(), "redis.addr") {
 		t.Fatalf("expected required redis address: %v", err)
 	}
 	for _, cfg := range []RedisConfig{{Addr: "localhost:6379", DB: -1}, {Addr: "localhost:6379", Timeout: "-1s"}, {Addr: "localhost:6379", Timeout: "bad"}} {

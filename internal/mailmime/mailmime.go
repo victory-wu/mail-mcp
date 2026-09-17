@@ -16,6 +16,7 @@ import (
 	"io"
 	"mime"
 	"net/mail"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -324,7 +325,9 @@ func HTMLToText(h string) string {
 // get_attachment, so path separators, traversal segments, and control
 // characters must not survive.
 func SanitizeFilename(name string) string {
-	name = filepath.Base(strings.ReplaceAll(name, `\`, "/"))
+	// MIME names are not host filesystem paths; avoid interpreting a colon as
+	// a Windows drive prefix before replacing unsafe characters.
+	name = path.Base(strings.ReplaceAll(name, `\`, "/"))
 	name = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f || strings.ContainsRune(`/:*?"<>|`, r) {
 			return '_'

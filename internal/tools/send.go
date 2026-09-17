@@ -32,7 +32,6 @@ type composeFields struct {
 }
 
 type sendInput struct {
-	accountInput
 	composeFields
 }
 
@@ -57,7 +56,6 @@ type forwardInput struct {
 }
 
 type draftInput struct {
-	accountInput
 	composeFields
 	Folder string `json:"folder,omitempty" jsonschema:"folder to save into; defaults to the account's Drafts folder"`
 }
@@ -108,18 +106,15 @@ func (s *Server) registerSend(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:  "create_draft",
 		Title: "Save a draft",
-		Description: "Save a message to the Drafts folder without sending it. Always available, including on accounts where sending is disabled — " +
+		Description: "Save a message to the Drafts folder without sending it. " +
 			"use this when the user should review or send the message themselves.",
 		Annotations: writeTool(),
 	}, s.createDraft)
 }
 
 func (s *Server) sendEmail(ctx context.Context, _ *mcp.CallToolRequest, in sendInput) (*mcp.CallToolResult, sendOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
-		return nil, sendOutput{}, err
-	}
-	if err := s.requireSend(acc); err != nil {
 		return nil, sendOutput{}, err
 	}
 
@@ -146,9 +141,6 @@ func (s *Server) sendEmail(ctx context.Context, _ *mcp.CallToolRequest, in sendI
 func (s *Server) replyEmail(ctx context.Context, _ *mcp.CallToolRequest, in replyInput) (*mcp.CallToolResult, sendOutput, error) {
 	id, acc, err := s.resolveMessage(in.MessageID)
 	if err != nil {
-		return nil, sendOutput{}, err
-	}
-	if err := s.requireSend(acc); err != nil {
 		return nil, sendOutput{}, err
 	}
 	if strings.TrimSpace(in.BodyText) == "" && strings.TrimSpace(in.BodyHTML) == "" {
@@ -182,9 +174,6 @@ func (s *Server) replyEmail(ctx context.Context, _ *mcp.CallToolRequest, in repl
 func (s *Server) forwardEmail(ctx context.Context, _ *mcp.CallToolRequest, in forwardInput) (*mcp.CallToolResult, sendOutput, error) {
 	id, acc, err := s.resolveMessage(in.MessageID)
 	if err != nil {
-		return nil, sendOutput{}, err
-	}
-	if err := s.requireSend(acc); err != nil {
 		return nil, sendOutput{}, err
 	}
 
@@ -245,7 +234,7 @@ func (s *Server) forwardEmail(ctx context.Context, _ *mcp.CallToolRequest, in fo
 }
 
 func (s *Server) createDraft(ctx context.Context, _ *mcp.CallToolRequest, in draftInput) (*mcp.CallToolResult, draftOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
 		return nil, draftOutput{}, err
 	}
@@ -425,6 +414,9 @@ func (s *Server) loadAttachments(inputs []AttachmentInput) ([]send.Attachment, e
 	for i, in := range inputs {
 		switch {
 		case in.FilePath != "":
+			if err := s.checkAttachmentPath(in.FilePath); err != nil {
+				return nil, err
+			}
 			att, err := send.LoadAttachment(in.FilePath, s.cfg.Limits.MaxAttachmentBytes)
 			if err != nil {
 				return nil, err

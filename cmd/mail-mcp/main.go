@@ -1,11 +1,12 @@
 // Command mail-mcp serves IMAP and SMTP mailboxes to AI agents over MCP.
 //
 // Credentials live in server-side Redis and never reach the client:
-// tools take an opaque account_id, and the server resolves it locally.
+// HTTP authentication selects the account for every tool call.
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"flag"
 	"fmt"
@@ -38,6 +39,14 @@ var version = "dev"
 
 const mcpPath = "/mcp"
 
+// @title Mail MCP Account Management API
+// @version 1.0
+// @description Administrative REST endpoints for Redis account configuration. Enable with --backend-api-key or BACKEND_API_KEY. MCP JSON-RPC tools are described by MCP tool discovery, not this REST specification.
+// @BasePath /
+// @securityDefinitions.apikey BackendBearer
+// @in header
+// @name Authorization
+// @description Enter Bearer followed by the management key configured with --backend-api-key or BACKEND_API_KEY.
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "mail-mcp: %v\n", err)
@@ -47,13 +56,13 @@ func main() {
 
 func run() error {
 	var (
-		configPath     = flag.String("config", envOr("CONFIG_PATH", "config.yml"), "path to the YAML config file")
-		addr           = flag.String("addr", envOr("ADDR", ":"+envOr("PORT", "3000")), "address to listen on")
-		transport      = flag.String("transport", envOr("TRANSPORT", "http"), "transport: http or stdio")
-		logLevel       = flag.String("log-level", envOr("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
-		trustProxy     = flag.Bool("trust-proxy", envBool("TRUST_PROXY", false), "trust X-Forwarded-For for rate limiting; only enable behind a proxy you control")
-		showVersion    = flag.Bool("version", false, "print the version and exit")
-		accountsAPIKey = flag.String("accounts-api-key", envOr("ACCOUNTS_API_KEY", ""), "bearer key for account management HTTP endpoints; empty disables them")
+		configPath = flag.String("config", envOr("CONFIG_PATH", "config.yml"), "path to the YAML config file")
+		addr       = flag.String("addr", envOr("ADDR", ":"+envOr("PORT", "3000")), "address to listen on")
+
+		logLevel      = flag.String("log-level", envOr("LOG_LEVEL", "info"), "log level: debug, info, warn, error")
+		trustProxy    = flag.Bool("trust-proxy", envBool("TRUST_PROXY", false), "trust X-Forwarded-For for rate limiting; only enable behind a proxy you control")
+		showVersion   = flag.Bool("version", false, "print the version and exit")
+		backendAPIKey = flag.String("backend-api-key", envOr("BACKEND_API_KEY", "7858fc761b8544f398fc761b8534f3cd"), "bearer key for backend HTTP endpoints; empty disables them")
 	)
 	flag.Parse()
 
@@ -62,7 +71,7 @@ func run() error {
 		return nil
 	}
 
-	logger := newLogger(*logLevel, *transport)
+	logger := newLogger(*logLevel)
 	mailbox.Version = version
 
 	cfg, err := config.Load(*configPath)
@@ -72,63 +81,55 @@ func run() error {
 	logger.Info("configuration loaded",
 		"path", *configPath,
 		"accounts", len(cfg.Accounts),
-		"send_enabled", cfg.AllowSend,
-		"delete_enabled", cfg.AllowDelete,
 		"idle_connection_timeout", cfg.IdleConnTTL,
 	)
 
 	pool := mailbox.NewPool(cfg, logger)
 	defer pool.Close()
 
-	apiKey := strings.TrimSpace(os.Getenv("MCP_API_KEY"))
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 
+	return serveHTTP(ctx, pool, cfg, logger, *addr, *trustProxy, *backendAPIKey)
+}
+
+func newMCPServer(toolServer *tools.Server, logger *slog.Logger) *mcp.Server {
 	srv := mcp.NewServer(
 		&mcp.Implementation{Name: "mail-mcp", Version: version, Title: "Mail"},
 		&mcp.ServerOptions{Instructions: tools.Instructions, Logger: logger},
 	)
-	tools.New(cfg, pool, logger, version, apiKey).Register(srv)
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	switch strings.ToLower(*transport) {
-	case "stdio":
-		logger.Info("serving on stdio", "version", version)
-		return srv.Run(ctx, &mcp.StdioTransport{})
-	case "http":
-		return serveHTTP(ctx, srv, cfg, logger, *addr, *trustProxy, apiKey, *accountsAPIKey)
-	default:
-		return fmt.Errorf("unknown transport %q: use http or stdio", *transport)
-	}
+	toolServer.Register(srv)
+	return srv
 }
 
-func serveHTTP(ctx context.Context, srv *mcp.Server, cfg *config.Config, logger *slog.Logger, addr string, trustProxy bool, apiKey, accountsAPIKey string) error {
-	// No token, no server. This process can read and send a person's mail;
-	// starting it open to the network would be indefensible.
-	if apiKey == "" {
-		return errors.New("MCP_API_KEY is not set. The HTTP transport requires a bearer token — " +
-			"generate one with `openssl rand -hex 32`, or use --transport stdio for local-only use")
+func accountMCPHandler(cfg *config.Config, pool *mailbox.Pool, logger *slog.Logger, downloadSecret string) http.Handler {
+	servers := make(map[string]*mcp.Server, len(cfg.Accounts))
+	for _, account := range cfg.Accounts {
+		servers[account.ID] = newMCPServer(tools.NewForAccount(cfg, account, pool, logger, version, downloadSecret), logger)
 	}
-	if len(apiKey) < 16 {
-		return errors.New("MCP_API_KEY is too short; use at least 16 characters (`openssl rand -hex 32`)")
-	}
-
-	mcpHandler := mcp.NewStreamableHTTPHandler(
-		func(*http.Request) *mcp.Server { return srv },
+	return mcp.NewStreamableHTTPHandler(
+		func(r *http.Request) *mcp.Server { return servers[httpx.AuthenticatedAccount(r.Context())] },
 		&mcp.StreamableHTTPOptions{Logger: logger, Stateless: true},
 	)
-	attachments := httpx.AttachmentHandler(apiKey, cfg.Limits.AttachmentDir, logger)
+}
+
+func serveHTTP(ctx context.Context, pool *mailbox.Pool, cfg *config.Config, logger *slog.Logger, addr string, trustProxy bool, backendAPIKey string) error {
+	// Download signatures must not use a client-known subkey: that would let
+	// clients forge links to other accounts' files. Restart invalidates old links.
+	downloadSecret := rand.Text()
+	mcpHandler := accountMCPHandler(cfg, pool, logger, downloadSecret)
+	attachments := httpx.AttachmentHandler(downloadSecret, cfg.Limits.AttachmentDir, logger)
 	var accounts http.Handler
-	if accountsAPIKey != "" {
-		store, err := cfg.Redis.AccountStore()
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		accounts = httpx.AccountsHandler(accountsAPIKey, store, logger)
+
+	store, err := cfg.Redis.AccountStore()
+	if err != nil {
+		return err
 	}
+	defer store.Close()
+	accounts = httpx.AccountsHandler(backendAPIKey, store, logger)
+
 	handler := httpx.Handler(
-		apiKey, logger, trustProxy,
+		cfg.AccountIDs(), logger, trustProxy,
 		envInt("RATE_LIMIT_GET_RPM", 60),
 		envInt("RATE_LIMIT_POST_RPM", 240),
 		mcpHandler, attachments, accounts,
@@ -163,17 +164,13 @@ func serveHTTP(ctx context.Context, srv *mcp.Server, cfg *config.Config, logger 
 	}
 }
 
-// newLogger writes to stderr, which keeps stdout clean for the stdio
-// transport's JSON-RPC framing.
-func newLogger(level, transport string) *slog.Logger {
+// newLogger writes server logs to stderr.
+func newLogger(level string) *slog.Logger {
 	var lvl slog.Level
 	if err := lvl.UnmarshalText([]byte(level)); err != nil {
 		lvl = slog.LevelInfo
 	}
 	opts := &slog.HandlerOptions{Level: lvl}
-	if transport == "stdio" {
-		return slog.New(slog.NewTextHandler(os.Stderr, opts))
-	}
 	return slog.New(slog.NewTextHandler(os.Stderr, opts))
 }
 

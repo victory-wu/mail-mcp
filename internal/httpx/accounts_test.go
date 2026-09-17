@@ -39,7 +39,7 @@ func (s *fakeAccountStore) Delete(_ context.Context, subkey string) (bool, error
 func TestAccountAPIAuthenticationAndRoutes(t *testing.T) {
 	const adminKey = "management-secret"
 	store := &fakeAccountStore{deleted: true}
-	handler := Handler(testSecret, discardLogger(), false, 0, 0, okHandler(), http.NotFoundHandler(), AccountsHandler(adminKey, store, discardLogger()))
+	handler := Handler([]string{testSecret}, discardLogger(), false, 0, 0, okHandler(), http.NotFoundHandler(), AccountsHandler(adminKey, store, discardLogger()))
 	request := func(method, path, token, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		if token != "" {

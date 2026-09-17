@@ -9,12 +9,12 @@ const mcpPath = "/mcp"
 
 // Handler exposes /mcp, signed attachment downloads, and optional account
 // management with its own authentication handler.
-func Handler(apiKey string, logger *slog.Logger, trustProxy bool, getRPM, postRPM int, mcp, attachments, accounts http.Handler) http.Handler {
+func Handler(accountIDs []string, logger *slog.Logger, trustProxy bool, getRPM, postRPM int, mcp, attachments, accounts http.Handler) http.Handler {
 	limiter := NewRateLimiter(getRPM, postRPM, trustProxy)
 
 	wrap := func(inner http.Handler, bearer bool) http.Handler {
 		if bearer {
-			inner = RequireBearer(apiKey, logger, inner)
+			inner = RequireAccountBearer(accountIDs, logger, inner)
 		}
 		inner = limiter.Middleware(inner)
 		inner = SecurityHeaders(inner)

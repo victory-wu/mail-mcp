@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,7 +18,6 @@ import (
 )
 
 type searchInput struct {
-	accountInput
 	Folder  string `json:"folder,omitempty" jsonschema:"folder to search; defaults to INBOX. Use list_folders to see the options"`
 	From    string `json:"from,omitempty" jsonschema:"substring match against the From header"`
 	To      string `json:"to,omitempty" jsonschema:"substring match against the To header"`
@@ -71,7 +71,7 @@ type getAttachmentInput struct {
 type getAttachmentOutput struct {
 	Summary         string `json:"summary" jsonschema:"one-line description of the result"`
 	FilePath        string `json:"file_path" jsonschema:"absolute path of the written file on the server; not usable from a remote agent"`
-	DownloadURL     string `json:"download_url,omitempty" jsonschema:"HTTP URL that serves this file for 15 minutes; curl it onto the agent's machine. Empty on stdio or when public_url is unset"`
+	DownloadURL     string `json:"download_url,omitempty" jsonschema:"HTTP URL that serves this file for 15 minutes; curl it onto the agent's machine. Empty when public_url is unset"`
 	DownloadExpires string `json:"download_expires_at,omitempty" jsonschema:"RFC 3339 expiry of download_url"`
 	Filename        string `json:"filename" jsonschema:"sanitized filename on disk"`
 	ContentType     string `json:"content_type" jsonschema:"MIME type of the attachment"`
@@ -108,7 +108,7 @@ func (s *Server) registerRead(srv *mcp.Server) {
 }
 
 func (s *Server) searchEmails(ctx context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, searchOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+	acc, err := s.resolveAccount()
 	if err != nil {
 		return nil, searchOutput{}, err
 	}
@@ -238,6 +238,13 @@ func (s *Server) getAttachment(ctx context.Context, _ *mcp.CallToolRequest, in g
 	}
 
 	outputDir := firstNonEmpty(in.OutputDir, s.cfg.Limits.AttachmentDir)
+	if in.OutputDir != "" {
+		requested, err := filepath.Abs(in.OutputDir)
+		configured, configErr := filepath.Abs(s.cfg.Limits.AttachmentDir)
+		if err != nil || configErr != nil || requested != configured {
+			return nil, getAttachmentOutput{}, fmt.Errorf("output_dir must be the configured attachment directory for HTTP access; omit output_dir")
+		}
+	}
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return nil, getAttachmentOutput{}, fmt.Errorf("cannot create output directory %q: %w", outputDir, err)
 	}
@@ -258,10 +265,10 @@ func (s *Server) getAttachment(ctx context.Context, _ *mcp.CallToolRequest, in g
 		return nil, getAttachmentOutput{}, err
 	}
 
-	// Prefix with the uid and part id so two attachments named invoice.pdf
-	// from different messages cannot overwrite one another.
+	// Random names avoid collisions across accounts, folders, and repeated
+	// downloads, so an existing signed URL never changes its file contents.
 	safeName := mailmime.SanitizeFilename(extracted.Filename)
-	diskName := fmt.Sprintf("%d-%s-%s", id.UID, strings.ReplaceAll(extracted.PartID, ".", "_"), safeName)
+	diskName := mailmime.SanitizeFilename(s.attachmentPrefix + rand.Text() + "-" + safeName)
 	path := filepath.Join(outputDir, diskName)
 
 	if err := os.WriteFile(path, extracted.Content, 0o600); err != nil {
@@ -292,8 +299,7 @@ func (s *Server) mintDownload(diskName, absPath string) (string, time.Time, bool
 	if s.cfg.PublicURL == "" || s.downloadSecret == "" {
 		return "", time.Time{}, false
 	}
-	// The HTTP handler only serves the configured attachment dir. A custom
-	// output_dir is for local use; minting a URL that 404s would be a lie.
+	// Only mint links for files served by the attachment handler.
 	configured, err := filepath.Abs(s.cfg.Limits.AttachmentDir)
 	if err != nil || filepath.Dir(absPath) != configured {
 		return "", time.Time{}, false

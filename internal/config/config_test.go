@@ -73,41 +73,6 @@ func TestLoadAppliesDefaults(t *testing.T) {
 	}
 }
 
-func TestGatesDefaultToClosed(t *testing.T) {
-	cfg := loadOK(t, minimal)
-	// A fresh install must not let an agent send or delete mail until the
-	// operator opts in.
-	if cfg.SendAllowed(cfg.Accounts[0]) {
-		t.Error("sending should be disabled by default")
-	}
-	if cfg.DeleteAllowed(cfg.Accounts[0]) {
-		t.Error("deleting should be disabled by default")
-	}
-}
-
-func TestPerAccountGatesOverrideGlobal(t *testing.T) {
-	cfg := loadOK(t, `
-allow_send: true
-allow_delete: true
-accounts:
-  - id: open
-    imap: {host: h, username: u@e.com, password: p}
-  - id: locked
-    allow_send: false
-    allow_delete: false
-    imap: {host: h, username: u@e.com, password: p}
-`)
-	open, _ := cfg.Resolve("open")
-	locked, _ := cfg.Resolve("locked")
-
-	if !cfg.SendAllowed(open) || !cfg.DeleteAllowed(open) {
-		t.Error("global true should apply to an account with no override")
-	}
-	if cfg.SendAllowed(locked) || cfg.DeleteAllowed(locked) {
-		t.Error("per-account false should override global true")
-	}
-}
-
 func TestExplicitSecurityOverridesPortInference(t *testing.T) {
 	cfg := loadOK(t, `
 accounts:

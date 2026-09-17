@@ -63,10 +63,6 @@ type Account struct {
 	// FromName is the optional display name on outgoing mail.
 	FromName string `yaml:"from_name" json:"from_name,omitempty"`
 
-	// AllowSend / AllowDelete override the global gates for this account.
-	AllowSend   *bool `yaml:"allow_send" json:"allow_send,omitempty"`
-	AllowDelete *bool `yaml:"allow_delete" json:"allow_delete,omitempty"`
-
 	// SaveSent controls whether outgoing mail is APPENDed to the Sent
 	// folder. Nil means "decide from the provider" — see ShouldSaveSent.
 	SaveSent *bool `yaml:"save_sent" json:"save_sent,omitempty"`
@@ -113,8 +109,6 @@ type rawTimeouts struct {
 
 // Config is the fully resolved server configuration.
 type Config struct {
-	AllowSend          bool        `yaml:"allow_send"`
-	AllowDelete        bool        `yaml:"allow_delete"`
 	Limits             Limits      `yaml:"limits"`
 	Timeouts           Timeouts    `yaml:"-"`
 	RawTimeouts        rawTimeouts `yaml:"timeouts"`
@@ -124,7 +118,7 @@ type Config struct {
 
 	// PublicURL is the absolute origin clients use to fetch attachments
 	// over HTTP. Empty means get_attachment will not mint a download_url
-	// (stdio deployments, or HTTP without a known public hostname).
+	// (HTTP without a known public hostname).
 	PublicURL string `yaml:"public_url"`
 
 	// IdleConnTTL is how long a pooled IMAP connection may sit unused
@@ -402,22 +396,6 @@ func (c *Config) AccountIDs() []string {
 		ids[i] = a.ID
 	}
 	return ids
-}
-
-// SendAllowed reports whether the account may send mail.
-func (c *Config) SendAllowed(a *Account) bool {
-	if a.AllowSend != nil {
-		return *a.AllowSend
-	}
-	return c.AllowSend
-}
-
-// DeleteAllowed reports whether the account may delete mail or folders.
-func (c *Config) DeleteAllowed(a *Account) bool {
-	if a.AllowDelete != nil {
-		return *a.AllowDelete
-	}
-	return c.AllowDelete
 }
 
 // ShouldSaveSent reports whether a copy of outgoing mail should be APPENDed

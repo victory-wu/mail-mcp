@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -17,9 +18,7 @@ import (
 
 func loadTestConfig(t *testing.T) *config.Config {
 	t.Helper()
-	deny := false
 	return &config.Config{
-		AllowSend:   true,
 		Limits:      config.Limits{MaxBodyChars: config.DefaultMaxBodyChars, MaxSearchResults: config.DefaultMaxSearchResults, MaxAttachmentBytes: config.DefaultMaxAttachmentBytes, AttachmentDir: t.TempDir()},
 		Timeouts:    config.Timeouts{IMAPConnect: config.DefaultIMAPConnect, IMAPCommand: config.DefaultIMAPCommand, SMTPConnect: config.DefaultSMTPConnect, SMTPSend: config.DefaultSMTPSend},
 		IdleConnTTL: config.DefaultIdleConnTTL,
@@ -27,7 +26,7 @@ func loadTestConfig(t *testing.T) *config.Config {
 			{ID: "personal", FromAddress: "me@example.com", FromName: "Test User",
 				IMAP: config.Endpoint{Host: "imap.example.com", Port: 993, Security: config.SecurityTLS, Username: "me@example.com", Password: "secret-imap-password"},
 				SMTP: config.Endpoint{Host: "smtp.example.com", Port: 587, Security: config.SecuritySTARTTLS, Username: "me@example.com", Password: "secret-smtp-password"}},
-			{ID: "work", FromAddress: "me@work.example", AllowSend: &deny,
+			{ID: "work", FromAddress: "me@work.example",
 				IMAP: config.Endpoint{Host: "imap.work.example", Port: 993, Security: config.SecurityTLS, Username: "me@work.example", Password: "another-secret"},
 				SMTP: config.Endpoint{Host: "imap.work.example", Port: 587, Security: config.SecuritySTARTTLS, Username: "me@work.example", Password: "another-secret"}},
 		},
@@ -43,7 +42,7 @@ func connect(t *testing.T, cfg *config.Config) *mcp.ClientSession {
 
 	srv := mcp.NewServer(&mcp.Implementation{Name: "mail-mcp", Version: "test"},
 		&mcp.ServerOptions{Instructions: Instructions})
-	New(cfg, pool, logger, "test", "").Register(srv)
+	NewForAccount(cfg, cfg.Accounts[0], pool, logger, "test", "").Register(srv)
 
 	clientTransport, serverTransport := mcp.NewInMemoryTransports()
 	ctx := context.Background()
@@ -90,6 +89,18 @@ func TestAllToolsRegister(t *testing.T) {
 	for name, tool := range got {
 		if tool.Description == "" {
 			t.Errorf("tool %q has no description", name)
+		}
+		raw, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var schema map[string]any
+		if err := json.Unmarshal(raw, &schema); err != nil {
+			t.Fatal(err)
+		}
+		props, _ := schema["properties"].(map[string]any)
+		if _, exists := props["account_id"]; exists {
+			t.Errorf("%s exposes account_id", name)
 		}
 		if tool.InputSchema == nil {
 			t.Errorf("tool %q has no input schema", name)
@@ -166,16 +177,16 @@ func TestRequiredFields(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
 
 	cases := map[string][]string{
-		"search_emails": {"account_id"},
+		"search_emails": {},
 		"read_email":    {"message_id"},
-		"send_email":    {"account_id", "to", "subject"},
+		"send_email":    {"to", "subject"},
 		"reply_email":   {"message_id"},
 		"forward_email": {"message_id", "to"},
 		"move_email":    {"message_id", "to_folder"},
 		"mark_email":    {"message_id", "action"},
 		"delete_email":  {"message_id", "confirm"},
-		"delete_folder": {"account_id", "name", "confirm"},
-		"create_folder": {"account_id", "name"},
+		"delete_folder": {"name", "confirm"},
+		"create_folder": {"name"},
 	}
 	for tool, want := range cases {
 		required := requiredFields(schemaFor(t, session, tool))
@@ -271,7 +282,7 @@ func TestListAccountsNeverLeaksCredentials(t *testing.T) {
 			t.Errorf("list_accounts leaked %q in: %s", secret, body)
 		}
 	}
-	for _, want := range []string{"personal", "work", "me@example.com"} {
+	for _, want := range []string{"personal", "me@example.com"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("list_accounts omitted %q: %s", want, body)
 		}
@@ -291,22 +302,52 @@ func TestGetServerInfoNeverLeaksCredentials(t *testing.T) {
 	}
 }
 
-func TestSendBlockedWhenAccountDisallowsIt(t *testing.T) {
-	session := connect(t, loadTestConfig(t))
-	res := callTool(t, session, "send_email", map[string]any{
-		"account_id": "work", // allow_send: false
-		"to":         []string{"someone@example.com"},
-		"subject":    "Should not send",
-		"body_text":  "nope",
-	})
-	if !res.IsError {
-		t.Fatal("send_email succeeded on an account with sending disabled")
+func TestVerifyAccountLogsConnectionFailuresWithoutPasswords(t *testing.T) {
+	cfg := loadTestConfig(t)
+	acc := cfg.Accounts[0]
+	acc.IMAP.Security = config.Security("invalid-imap-security")
+	acc.SMTP.Security = config.Security("invalid-smtp-security")
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	server := NewForAccount(cfg, acc, nil, logger, "test", "")
+	_, out, err := server.verifyAccount(context.Background(), nil, struct{}{})
+	if err != nil {
+		t.Fatalf("verifyAccount: %v", err)
 	}
-	if !strings.Contains(resultText(res), "disabled") {
-		t.Errorf("unhelpful error: %s", resultText(res))
+	if out.IMAPOK || out.SMTPOK {
+		t.Fatalf("invalid security modes unexpectedly passed: %+v", out)
+	}
+
+	text := logs.String()
+	for _, want := range []string{
+		"mailbox verification failed",
+		"protocol=IMAP",
+		"protocol=SMTP",
+		"invalid-imap-security",
+		"invalid-smtp-security",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("verification log omitted %q: %s", want, text)
+		}
+	}
+	for _, secret := range []string{acc.IMAP.Password, acc.SMTP.Password} {
+		if strings.Contains(text, secret) {
+			t.Errorf("verification log leaked a password: %s", text)
+		}
 	}
 }
 
+func TestAccountsAlwaysReportSendingAvailable(t *testing.T) {
+	session := connect(t, loadTestConfig(t))
+	res := callTool(t, session, "list_accounts", map[string]any{})
+	if res.IsError {
+		t.Fatal(resultText(res))
+	}
+	if strings.Contains(resultText(res), `"can_send":false`) || !strings.Contains(resultText(res), `"can_send":true`) {
+		t.Fatalf("sending should be available: %s", resultText(res))
+	}
+}
 func TestDeleteRequiresConfirmation(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
 	handle := msgid.Encode("personal", "INBOX", 1, 5)
@@ -323,30 +364,21 @@ func TestDeleteRequiresConfirmation(t *testing.T) {
 	}
 }
 
-func TestDeleteBlockedWhenAccountDisallowsIt(t *testing.T) {
+func TestAccountsAlwaysReportDeletionAvailable(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
-	// Confirmed, but the config has allow_delete: false globally.
-	res := callTool(t, session, "delete_email", map[string]any{
-		"message_id": msgid.Encode("personal", "INBOX", 1, 5),
-		"confirm":    true,
-	})
-	if !res.IsError {
-		t.Fatal("delete_email succeeded despite allow_delete being false")
+	res := callTool(t, session, "list_accounts", map[string]any{})
+	if res.IsError {
+		t.Fatal(resultText(res))
 	}
-	if !strings.Contains(resultText(res), "disabled") {
-		t.Errorf("unhelpful error: %s", resultText(res))
+	if strings.Contains(resultText(res), `"can_delete":false`) || !strings.Contains(resultText(res), `"can_delete":true`) {
+		t.Fatalf("deletion should be available: %s", resultText(res))
 	}
 }
-
-func TestUnknownAccountIsRejectedClearly(t *testing.T) {
+func TestAccountParameterIsRejected(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
-	res := callTool(t, session, "search_emails", map[string]any{"account_id": "nope"})
-	if !res.IsError {
-		t.Fatal("search_emails accepted an unknown account")
-	}
-	body := resultText(res)
-	if !strings.Contains(body, "nope") || !strings.Contains(body, "personal") {
-		t.Errorf("error should name the bad id and list valid ones: %s", body)
+	res := callTool(t, session, "search_emails", map[string]any{"account_id": "work"})
+	if !res.IsError || !strings.Contains(resultText(res), "account_id") {
+		t.Fatalf("expected removed parameter rejection: %s", resultText(res))
 	}
 }
 
@@ -370,8 +402,8 @@ func TestMessageIDForUnconfiguredAccountIsRejected(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("read_email accepted a handle for an unconfigured account")
 	}
-	if !strings.Contains(resultText(res), "deleted-account") {
-		t.Errorf("error should name the missing account: %s", resultText(res))
+	if !strings.Contains(resultText(res), "not accessible to this account") {
+		t.Errorf("error should reject the foreign account: %s", resultText(res))
 	}
 }
 
@@ -395,10 +427,9 @@ func TestSendRejectsWrapperLeakBeforeConnecting(t *testing.T) {
 	// different error. Getting the validation error proves the check runs
 	// before any connection is attempted.
 	res := callTool(t, session, "send_email", map[string]any{
-		"account_id": "personal",
-		"to":         []string{"someone@example.com"},
-		"subject":    "Leak test",
-		"body_text":  `Hi</body_text><parameter name="body_html"><p>Hi</p>`,
+		"to":        []string{"someone@example.com"},
+		"subject":   "Leak test",
+		"body_text": `Hi</body_text><parameter name="body_html"><p>Hi</p>`,
 	})
 	if !res.IsError {
 		t.Fatal("send_email accepted leaked tool-call syntax")
@@ -411,10 +442,9 @@ func TestSendRejectsWrapperLeakBeforeConnecting(t *testing.T) {
 func TestSendValidatesRecipientsBeforeConnecting(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
 	res := callTool(t, session, "send_email", map[string]any{
-		"account_id": "personal",
-		"to":         []string{"not-an-address"},
-		"subject":    "Bad recipient",
-		"body_text":  "hi",
+		"to":        []string{"not-an-address"},
+		"subject":   "Bad recipient",
+		"body_text": "hi",
 	})
 	if !res.IsError {
 		t.Fatal("send_email accepted an invalid recipient")
@@ -427,9 +457,8 @@ func TestSendValidatesRecipientsBeforeConnecting(t *testing.T) {
 func TestSearchRejectsContradictoryFilters(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
 	res := callTool(t, session, "search_emails", map[string]any{
-		"account_id": "personal",
-		"seen":       true,
-		"unseen":     true,
+		"seen":   true,
+		"unseen": true,
 	})
 	if !res.IsError {
 		t.Fatal("search_emails accepted seen and unseen together")
@@ -440,8 +469,7 @@ func TestSearchRejectsBadDates(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
 	for _, field := range []string{"since", "before"} {
 		res := callTool(t, session, "search_emails", map[string]any{
-			"account_id": "personal",
-			field:        "last tuesday",
+			field: "last tuesday",
 		})
 		if !res.IsError {
 			t.Errorf("search_emails accepted %s=%q", field, "last tuesday")
@@ -452,9 +480,8 @@ func TestSearchRejectsBadDates(t *testing.T) {
 func TestFolderToolsRefuseInbox(t *testing.T) {
 	session := connect(t, loadTestConfig(t))
 	res := callTool(t, session, "rename_folder", map[string]any{
-		"account_id": "personal",
-		"old_name":   "INBOX",
-		"new_name":   "Something",
+		"old_name": "INBOX",
+		"new_name": "Something",
 	})
 	if !res.IsError {
 		t.Fatal("rename_folder accepted INBOX")

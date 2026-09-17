@@ -22,7 +22,7 @@ func TestHandlerSplitsAuth(t *testing.T) {
 		mcpHit = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := Handler(testSecret, discardLogger(), false, 0, 0, mcp, AttachmentHandler(testSecret, dir, discardLogger()), nil)
+	handler := Handler([]string{testSecret}, discardLogger(), false, 0, 0, mcp, AttachmentHandler(testSecret, dir, discardLogger()), nil)
 
 	t.Run("mcp without bearer is 401", func(t *testing.T) {
 		rec := httptest.NewRecorder()

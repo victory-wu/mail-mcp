@@ -17,14 +17,12 @@ var ErrInvalidAccount = errors.New("invalid account configuration")
 // CreateAccountInput supplies the caller's hostname and login email separately so
 // the caller never needs to construct or choose an account's persistent ID.
 type CreateAccountInput struct {
-	Hostname    string   `json:"hostname"`
-	Email       string   `json:"email"`
-	IMAP        Endpoint `json:"imap"`
+	Hostname    string   `json:"hostname" validate:"required"`
+	Email       string   `json:"email" validate:"required"`
+	IMAP        Endpoint `json:"imap" validate:"required"`
 	SMTP        Endpoint `json:"smtp"`
 	FromAddress string   `json:"from_address,omitempty"`
 	FromName    string   `json:"from_name,omitempty"`
-	AllowSend   *bool    `json:"allow_send,omitempty"`
-	AllowDelete *bool    `json:"allow_delete,omitempty"`
 	SaveSent    *bool    `json:"save_sent,omitempty"`
 }
 
@@ -64,7 +62,7 @@ func prepareAccount(in CreateAccountInput) (*Account, error) {
 		return nil, fmt.Errorf("generate account UUID: %w", err)
 	}
 	a := &Account{ID: host + "-" + email + "-" + identifier.String(), Hostname: host, IMAP: in.IMAP, SMTP: in.SMTP,
-		FromAddress: in.FromAddress, FromName: in.FromName, AllowSend: in.AllowSend, AllowDelete: in.AllowDelete, SaveSent: in.SaveSent}
+		FromAddress: in.FromAddress, FromName: in.FromName, SaveSent: in.SaveSent}
 	a.IMAP.Username = email
 	if _, err := accountField(a); err != nil {
 		return nil, fmt.Errorf("%w: email must be the actual login email address", ErrInvalidAccount)

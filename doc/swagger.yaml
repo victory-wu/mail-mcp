@@ -1,0 +1,252 @@
+basePath: /
+definitions:
+  config.Account:
+    properties:
+      from_address:
+        description: |-
+          FromAddress overrides the From header. Defaults to the SMTP username,
+          which matters for providers where the login differs from the sending
+          identity (iCloud custom domains, Google Workspace aliases).
+        type: string
+      from_name:
+        description: FromName is the optional display name on outgoing mail.
+        type: string
+      hostname:
+        type: string
+      id:
+        type: string
+      imap:
+        $ref: '#/definitions/config.Endpoint'
+      imap_host:
+        description: '---- legacy flat keys (poke-mail v1 config), normalized on load
+          ----'
+        type: string
+      imap_password:
+        type: string
+      imap_port:
+        type: integer
+      imap_username:
+        type: string
+      save_sent:
+        description: |-
+          SaveSent controls whether outgoing mail is APPENDed to the Sent
+          folder. Nil means "decide from the provider" — see ShouldSaveSent.
+        type: boolean
+      smtp:
+        $ref: '#/definitions/config.Endpoint'
+      smtp_host:
+        type: string
+      smtp_password:
+        type: string
+      smtp_port:
+        type: integer
+      smtp_username:
+        type: string
+    type: object
+  config.AccountRecord:
+    properties:
+      account:
+        $ref: '#/definitions/config.Account'
+      subkey:
+        type: string
+    type: object
+  config.CreateAccountInput:
+    properties:
+      email:
+        type: string
+      from_address:
+        type: string
+      from_name:
+        type: string
+      hostname:
+        type: string
+      imap:
+        $ref: '#/definitions/config.Endpoint'
+      save_sent:
+        type: boolean
+      smtp:
+        $ref: '#/definitions/config.Endpoint'
+    required:
+    - email
+    - hostname
+    - imap
+    type: object
+  config.Endpoint:
+    properties:
+      host:
+        type: string
+      password:
+        type: string
+      port:
+        type: integer
+      security:
+        $ref: '#/definitions/config.Security'
+      username:
+        type: string
+    type: object
+  config.Security:
+    enum:
+    - tls
+    - starttls
+    - plain
+    type: string
+    x-enum-varnames:
+    - SecurityTLS
+    - SecuritySTARTTLS
+    - SecurityPlain
+  httpx.accountCreatedResponse:
+    properties:
+      subkey:
+        type: string
+    type: object
+  httpx.accountErrorResponse:
+    properties:
+      error:
+        type: string
+      message:
+        type: string
+    type: object
+  httpx.accountsResponse:
+    properties:
+      accounts:
+        items:
+          $ref: '#/definitions/config.AccountRecord'
+        type: array
+    type: object
+info:
+  contact: {}
+  description: Administrative REST endpoints for Redis account configuration. Enable
+    with --backend-api-key or BACKEND_API_KEY. MCP JSON-RPC tools are described by
+    MCP tool discovery, not this REST specification.
+  title: Mail MCP Account Management API
+  version: "1.0"
+paths:
+  /admin/accounts:
+    get:
+      description: Literal, case-sensitive matching against hostname-email-UUID. Returns
+        full account configuration, including credentials. No matches returns an empty
+        array. Responses are not cached.
+      parameters:
+      - description: 'Subkey prefix: hostname-email'
+        in: query
+        name: prefix
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/httpx.accountsResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+      security:
+      - BackendBearer: []
+      summary: Query accounts by subkey prefix
+      tags:
+      - Accounts
+    post:
+      consumes:
+      - application/json
+      description: 'Stores account configuration under hostname-email-UUID. Hostname
+        identifies the calling machine, independently of IMAP/SMTP hosts. Maximum
+        request body: 64 KiB. MCP tools reload changes on restart.'
+      parameters:
+      - description: Account configuration; hostname, email, imap.host and imap.password
+          are required
+        in: body
+        name: account
+        required: true
+        schema:
+          $ref: '#/definitions/config.CreateAccountInput'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/httpx.accountCreatedResponse'
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+      security:
+      - BackendBearer: []
+      summary: Create an account
+      tags:
+      - Accounts
+  /admin/accounts/{subkey}:
+    delete:
+      description: Deletes exactly one Redis hash field without deleting mailbox messages.
+        MCP tools reload changes on restart.
+      parameters:
+      - description: Complete hostname-email-UUID subkey
+        in: path
+        name: subkey
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "204":
+          description: Account deleted
+        "400":
+          description: Bad Request
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "401":
+          description: Unauthorized
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "404":
+          description: Not Found
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "429":
+          description: Too Many Requests
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+        "503":
+          description: Service Unavailable
+          schema:
+            $ref: '#/definitions/httpx.accountErrorResponse'
+      security:
+      - BackendBearer: []
+      summary: Delete an account by subkey
+      tags:
+      - Accounts
+securityDefinitions:
+  BackendBearer:
+    description: Enter Bearer followed by the management key configured with --backend-api-key
+      or BACKEND_API_KEY.
+    in: header
+    name: Authorization
+    type: apiKey
+swagger: "2.0"

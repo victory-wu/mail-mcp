@@ -11,13 +11,13 @@ import (
 
 // AccountInfo is the non-secret description of a configured mailbox.
 type AccountInfo struct {
-	ID          string `json:"id" jsonschema:"identifier to pass as account_id"`
+	ID          string `json:"id" jsonschema:"identifier of the authenticated account"`
 	FromAddress string `json:"from_address" jsonschema:"address outgoing mail is sent from"`
 	FromName    string `json:"from_name,omitempty" jsonschema:"display name on outgoing mail"`
 	IMAPHost    string `json:"imap_host" jsonschema:"IMAP server hostname"`
 	SMTPHost    string `json:"smtp_host" jsonschema:"SMTP server hostname"`
-	CanSend     bool   `json:"can_send" jsonschema:"false when send_email is disabled for this account"`
-	CanDelete   bool   `json:"can_delete" jsonschema:"false when delete_email and delete_folder are disabled for this account"`
+	CanSend     bool   `json:"can_send" jsonschema:"always true; sending has no configuration gate"`
+	CanDelete   bool   `json:"can_delete" jsonschema:"always true; deletion has no configuration gate but requires confirmation"`
 	SavesSent   bool   `json:"saves_sent_copy" jsonschema:"true when the server files a copy of outgoing mail in the Sent folder"`
 }
 
@@ -51,7 +51,7 @@ func (s *Server) registerAccounts(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_accounts",
 		Title:       "List mailboxes",
-		Description: "List every configured mailbox. Call this first — all other tools need an account_id or a message_id obtained from a search. Makes no network connections.",
+		Description: "Describe the authenticated mailbox. The Authorization header selects the account for all tools. Makes no network connections.",
 		Annotations: readOnlyTool(),
 	}, s.listAccounts)
 
@@ -79,8 +79,8 @@ func (s *Server) listAccounts(_ context.Context, _ *mcp.CallToolRequest, _ struc
 			FromName:    a.FromName,
 			IMAPHost:    a.IMAP.Host,
 			SMTPHost:    a.SMTP.Host,
-			CanSend:     s.cfg.SendAllowed(a),
-			CanDelete:   s.cfg.DeleteAllowed(a),
+			CanSend:     true,
+			CanDelete:   true,
 			SavesSent:   s.cfg.ShouldSaveSent(a),
 		})
 	}
@@ -90,8 +90,8 @@ func (s *Server) listAccounts(_ context.Context, _ *mcp.CallToolRequest, _ struc
 	}, nil
 }
 
-func (s *Server) verifyAccount(ctx context.Context, _ *mcp.CallToolRequest, in accountInput) (*mcp.CallToolResult, verifyAccountOutput, error) {
-	acc, err := s.resolveAccount(in.AccountID)
+func (s *Server) verifyAccount(ctx context.Context, _ *mcp.CallToolRequest, in struct{}) (*mcp.CallToolResult, verifyAccountOutput, error) {
+	acc, err := s.resolveAccount()
 	if err != nil {
 		return nil, verifyAccountOutput{}, err
 	}
@@ -100,12 +100,26 @@ func (s *Server) verifyAccount(ctx context.Context, _ *mcp.CallToolRequest, in a
 
 	if err := mailbox.Verify(acc, s.cfg.Timeouts.IMAPConnect); err != nil {
 		out.IMAPError = err.Error()
+		s.logger.ErrorContext(ctx, "mailbox verification failed",
+			"protocol", "IMAP",
+			"host", acc.IMAP.Host,
+			"port", acc.IMAP.Port,
+			"security", acc.IMAP.Security,
+			"error", err,
+		)
 	} else {
 		out.IMAPOK = true
 	}
 
 	if err := send.Verify(ctx, acc, s.cfg.Timeouts); err != nil {
 		out.SMTPError = err.Error()
+		s.logger.ErrorContext(ctx, "mailbox verification failed",
+			"protocol", "SMTP",
+			"host", acc.SMTP.Host,
+			"port", acc.SMTP.Port,
+			"security", acc.SMTP.Security,
+			"error", err,
+		)
 	} else {
 		out.SMTPOK = true
 	}

@@ -1,15 +1,14 @@
 // Package tools exposes mailbox operations as MCP tools.
 //
-// Credentials never cross this boundary: tools accept an opaque account_id
-// (or an opaque message_id that embeds one) and the server resolves it
-// against server-side configuration. An agent can act on a mailbox without
-// ever learning how to connect to it.
+// HTTP authentication selects the account; message handles remain scoped to it.
 package tools
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -21,17 +20,39 @@ import (
 
 // Server holds the dependencies shared by every tool handler.
 type Server struct {
-	cfg            *config.Config
-	pool           *mailbox.Pool
-	logger         *slog.Logger
-	version        string
-	downloadSecret string
+	cfg              *config.Config
+	pool             *mailbox.Pool
+	logger           *slog.Logger
+	version          string
+	downloadSecret   string
+	attachmentPrefix string
 }
 
-// New builds a tool server. downloadSecret is the HMAC key for attachment
-// download URLs; empty disables minting them (stdio, or HTTP without a token).
-func New(cfg *config.Config, pool *mailbox.Pool, logger *slog.Logger, version, downloadSecret string) *Server {
-	return &Server{cfg: cfg, pool: pool, logger: logger, version: version, downloadSecret: downloadSecret}
+// NewForAccount isolates discovery and every account/handle resolver by giving
+// the HTTP tool server a private configuration containing only its owner.
+func NewForAccount(cfg *config.Config, account *config.Account, pool *mailbox.Pool, logger *slog.Logger, version, downloadSecret string) *Server {
+	scoped := *cfg
+	scoped.Accounts = []*config.Account{account}
+	s := &Server{cfg: &scoped, pool: pool, logger: logger, version: version, downloadSecret: downloadSecret}
+	s.attachmentPrefix = fmt.Sprintf("%x-", sha256.Sum256([]byte(account.ID)))
+	return s
+}
+
+// HTTP clients may reuse their own downloaded files, never arbitrary server
+// files or another account's attachments. Resolve symlinks before checking.
+func (s *Server) checkAttachmentPath(path string) error {
+	dir, err := filepath.Abs(s.cfg.Limits.AttachmentDir)
+	if err == nil {
+		dir, err = filepath.EvalSymlinks(dir)
+	}
+	resolved, pathErr := filepath.Abs(path)
+	if pathErr == nil {
+		resolved, pathErr = filepath.EvalSymlinks(resolved)
+	}
+	if err != nil || pathErr != nil || filepath.Dir(resolved) != dir || !strings.HasPrefix(filepath.Base(resolved), s.attachmentPrefix) {
+		return fmt.Errorf("file_path must reference an attachment downloaded by this account; use get_attachment or supply content_base64")
+	}
+	return nil
 }
 
 // Register attaches every tool to the MCP server.
@@ -44,10 +65,11 @@ func (s *Server) Register(srv *mcp.Server) {
 }
 
 // Instructions is the guidance handed to the connecting client.
-const Instructions = `Read, search, organize, and send email across the mailboxes configured on this server.
+const Instructions = `Read, search, organize, and send email for the authenticated mailbox.
 
-DISCOVERY. Call list_accounts first. Every tool needs either an account_id or a
-message_id, and message ids are only obtainable from search_emails.
+ACCOUNT. HTTP authentication selects the mailbox automatically; tools do not
+accept account_id. Call list_accounts to inspect the authenticated mailbox.
+Obtain message_id handles from search_emails for per-message operations.
 
 MESSAGE IDS. A message_id is an opaque handle that already identifies the
 account, folder, and message. Pass it back exactly as received — never edit,
@@ -83,11 +105,6 @@ confirm: true, and moves the message to Trash rather than erasing it.`
 
 // ---- shared input fragments ------------------------------------------------
 
-// accountInput is embedded by tools that act on a whole account.
-type accountInput struct {
-	AccountID string `json:"account_id" jsonschema:"account to act on; accepts the configured id or the account's email address. Call list_accounts to discover valid values"`
-}
-
 // messageInput is embedded by tools that act on one message.
 //
 // No account_id: the handle already carries it, which makes it impossible to
@@ -106,9 +123,12 @@ type AttachmentInput struct {
 
 // ---- helpers ---------------------------------------------------------------
 
-// resolveAccount looks up an account by id or address.
-func (s *Server) resolveAccount(id string) (*config.Account, error) {
-	return s.cfg.Resolve(id)
+// resolveAccount requires the private configuration created during authentication.
+func (s *Server) resolveAccount() (*config.Account, error) {
+	if len(s.cfg.Accounts) != 1 || s.cfg.Accounts[0] == nil {
+		return nil, fmt.Errorf("authenticated account unavailable; reconnect with a valid bearer token")
+	}
+	return s.cfg.Accounts[0], nil
 }
 
 // resolveMessage parses a handle and resolves the account it names.
@@ -117,29 +137,14 @@ func (s *Server) resolveMessage(handle string) (msgid.ID, *config.Account, error
 	if err != nil {
 		return msgid.ID{}, nil, err
 	}
-	acc, err := s.cfg.Resolve(id.Account)
+	acc, err := s.resolveAccount()
 	if err != nil {
-		return msgid.ID{}, nil, fmt.Errorf("message_id references account %q which is no longer configured: %w", id.Account, err)
+		return msgid.ID{}, nil, err
+	}
+	if id.Account != acc.ID {
+		return msgid.ID{}, nil, fmt.Errorf("message_id is not accessible to this account; use search_emails to obtain an authorized handle")
 	}
 	return id, acc, nil
-}
-
-// requireSend rejects the call when sending is gated off for the account.
-func (s *Server) requireSend(acc *config.Account) error {
-	if !s.cfg.SendAllowed(acc) {
-		return fmt.Errorf("sending is disabled for account %q. Use create_draft instead, "+
-			"or set allow_send: true for this account in the server config", acc.ID)
-	}
-	return nil
-}
-
-// requireDelete rejects the call when deletion is gated off for the account.
-func (s *Server) requireDelete(acc *config.Account) error {
-	if !s.cfg.DeleteAllowed(acc) {
-		return fmt.Errorf("deleting is disabled for account %q. Use archive_email or move_email instead, "+
-			"or set allow_delete: true for this account in the server config", acc.ID)
-	}
-	return nil
 }
 
 // withSession runs fn against a pooled connection for acc.

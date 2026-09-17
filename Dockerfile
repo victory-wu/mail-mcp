@@ -43,8 +43,7 @@ COPY --from=build --chown=65534:65534 /emptytmp /tmp
 USER 65534:65534
 
 ENV CONFIG_PATH=/config.yml \
-    PORT=3000 \
-    TRANSPORT=http
+    PORT=3000
 
 EXPOSE 3000
 
